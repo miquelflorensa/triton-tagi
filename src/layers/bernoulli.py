@@ -157,7 +157,7 @@ def triton_bernoulli_moments(mu_z, sigma_z_sq, n_gh=32):
 
     # normalise + derive variance & covariance
     P = P / P.sum(dim=-1, keepdim=True).clamp(min=1e-30)
-    V = P * (1.0 - P)
+    V = (P * (1.0 - P)).clamp(min=1e-12)
     C = EXf - mu_z * P
 
     if squeeze:
@@ -283,6 +283,9 @@ class Bernoulli:
             )
         else:
             P, V, C = triton_bernoulli_moments(mz, Sz, n_gh=self.n_gh)
+
+        # Apply Cauchy–Schwarz inequality to cov_z_a
+        C = torch.clamp(C, -torch.sqrt(Sz * V), torch.sqrt(Sz * V))
 
         # Jacobian: J_k = cov(z_k, a_k) / Sz_k
         self.J = C / torch.clamp(Sz, min=1e-7)

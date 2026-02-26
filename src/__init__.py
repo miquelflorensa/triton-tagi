@@ -14,11 +14,14 @@ Modules
 """
 
 from .network import Sequential
-from .layers import Linear, ReLU, Remax, Bernoulli, Conv2D, AvgPool2D, Flatten
+from .layers import (Linear, ReLU, Remax, Bernoulli,
+                     Conv2D, AvgPool2D, BatchNorm2D, ResBlock, Flatten)
+from .resnet18 import ResNet18
 
 __version__ = "0.1.0"
 __all__ = [
     "Sequential",
     "Linear", "ReLU", "Remax", "Bernoulli",
-    "Conv2D", "AvgPool2D", "Flatten",
+    "Conv2D", "AvgPool2D", "BatchNorm2D", "ResBlock", "Flatten",
+    "ResNet18",
 ]

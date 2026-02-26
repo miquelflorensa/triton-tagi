@@ -18,6 +18,8 @@ from torchvision import datasets
 
 from src import Sequential
 from src.layers import Linear, ReLU, Conv2D, AvgPool2D, Flatten, Remax, Bernoulli
+from src.init import forward_scale_weights, verify_standardization
+
 
 torch.manual_seed(42)
 np.random.seed(42)
@@ -132,19 +134,25 @@ def main():
         ReLU(),
         AvgPool2D(2),                                             # → 64×7×7
         Flatten(),                                                # → 3136
-        Linear(3136, 256, device=DEVICE, gain_mean=2.0, gain_var=2.0),
+        Linear(3136, 256, device=DEVICE, gain_mean=3.0, gain_var=3.0),
         ReLU(),
-        Linear(256, 10, device=DEVICE, gain_mean=2.0, gain_var=2.0),
-        # Remax(),
-        Bernoulli(n_gh=32),
+        Linear(256, 10, device=DEVICE, gain_mean=3.0, gain_var=3.0),
+        Remax(),
+        # Bernoulli(n_gh=32),
     ], device=DEVICE)
 
     print(f"\n{net}")
     print(f"  Parameters: {net.num_parameters():,}")
 
+    # ── Forward scaling ──
+    forward_scale_weights(net, x_train[:4096//4], target_var=1.0, skip_last_layer=True, verbose=True)
+
+    # ── Verify ──
+    verify_standardization(net, x_train[:4096//4], target_var=1.0, skip_last_layer=True, verbose=True)
+
     # ── Hyperparameters ──
     batch_size = 128
-    sigma_v    = 0.1
+    sigma_v    = 0.01
     n_epochs   = 20
 
     print(f"\n  Batch size : {batch_size}")

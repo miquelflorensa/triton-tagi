@@ -33,6 +33,8 @@ from .layers.remax import Remax
 from .layers.bernoulli import Bernoulli
 from .layers.conv2d import Conv2D
 from .layers.avgpool2d import AvgPool2D
+from .layers.batchnorm2d import BatchNorm2D
+from .layers.resblock import ResBlock
 from .layers.flatten import Flatten
 from .update.observation import compute_innovation
 from .update.parameters import get_cap_factor
@@ -41,7 +43,7 @@ from .update.parameters import get_cap_factor
 _ACTIVATION_LAYERS = (ReLU, Remax, Bernoulli, AvgPool2D, Flatten)
 
 # Layers that have learnable parameters and .update()
-_LEARNABLE_LAYERS = (Linear, Conv2D)
+_LEARNABLE_LAYERS = (Linear, Conv2D, BatchNorm2D, ResBlock)
 
 # All supported layers
 _ALL_LAYERS = _ACTIVATION_LAYERS + _LEARNABLE_LAYERS
@@ -69,6 +71,10 @@ class Sequential:
                 layer.Sw = layer.Sw.to(self.device)
                 layer.mb = layer.mb.to(self.device)
                 layer.Sb = layer.Sb.to(self.device)
+            # Move BatchNorm running stats
+            if hasattr(layer, 'running_mean'):
+                layer.running_mean = layer.running_mean.to(self.device)
+                layer.running_var  = layer.running_var.to(self.device)
 
     # ------------------------------------------------------------------
     #  Forward pass
@@ -140,6 +146,18 @@ class Sequential:
     # ------------------------------------------------------------------
     #  Utilities
     # ------------------------------------------------------------------
+    def train(self):
+        """Set all layers to training mode (affects BatchNorm, etc.)."""
+        for layer in self.layers:
+            if hasattr(layer, 'training'):
+                layer.train()
+
+    def eval(self):
+        """Set all layers to evaluation mode (affects BatchNorm, etc.)."""
+        for layer in self.layers:
+            if hasattr(layer, 'training'):
+                layer.eval()
+
     def __repr__(self):
         lines = ["Sequential("]
         for i, layer in enumerate(self.layers):

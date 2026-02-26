@@ -21,7 +21,8 @@ import time
 from torchvision import datasets, transforms
 
 from src import Sequential
-from src.layers import Linear, ReLU, Conv2D, Flatten, Remax, Bernoulli
+from src.layers import Linear, ReLU, Conv2D, Flatten, Remax, Bernoulli, BatchNorm2D, AvgPool2D
+from src.init import initialize_deep_network, autotune_decoupled_gains
 
 torch.manual_seed(42)
 np.random.seed(42)
@@ -33,55 +34,49 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #  Network builder
 # ======================================================================
 
-def build_3block_cnn(num_classes=10, head="remax", device="cuda",
-                     gain_w=1.0, gain_b=1.0):
+def build_simple_3cnn(num_classes=10, head="remax", device="cuda",
+                      gain_w=1.0, gain_b=1.0):
     """
-    3-block CNN matching cuTAGI's architecture.
-
-    Each block: Conv(3×3, pad=1) → ReLU → Conv(4×4, stride=2, pad=1) → ReLU
-    Stride-2 convolutions replace pooling for spatial downsampling.
+    Classic Simple 3-Conv CNN matching the requested BatchNorm architecture.
     """
     layers = [
-        # ── Block 1:  32×32 → 16×16 ──
-        Conv2D(3, 64, 3, stride=1, padding=1, device=device,
+        # Block 1
+        Conv2D(3, 32, 5, stride=1, padding=2, device=device,
                gain_w=gain_w, gain_b=gain_b),
         ReLU(),
-        Conv2D(64, 64, 4, stride=2, padding=1, device=device,
+        BatchNorm2D(32, device=device),
+        AvgPool2D(2),  # 32x32 -> 16x16
+        
+        # Block 2
+        Conv2D(32, 64, 5, stride=1, padding=2, device=device,
                gain_w=gain_w, gain_b=gain_b),
         ReLU(),
-
-        # ── Block 2:  16×16 → 8×8 ──
-        Conv2D(64, 128, 3, stride=1, padding=1, device=device,
+        BatchNorm2D(64, device=device),
+        AvgPool2D(2),  # 16x16 -> 8x8
+        
+        # Block 3
+        Conv2D(64, 64, 5, stride=1, padding=2, device=device,
                gain_w=gain_w, gain_b=gain_b),
         ReLU(),
-        Conv2D(128, 128, 4, stride=2, padding=1, device=device,
-               gain_w=gain_w, gain_b=gain_b),
-        ReLU(),
-
-        # ── Block 3:  8×8 → 4×4 ──
-        Conv2D(128, 256, 3, stride=1, padding=1, device=device,
-               gain_w=gain_w, gain_b=gain_b),
-        ReLU(),
-        Conv2D(256, 256, 4, stride=2, padding=1, device=device,
-               gain_w=gain_w, gain_b=gain_b),
-        ReLU(),
-
-        # ── Classifier ──
-        Flatten(),                                          # 256×4×4 = 4096
-        Linear(256 * 4 * 4, 512, device=device,
+        BatchNorm2D(64, device=device),
+        AvgPool2D(2),  # 8x8 -> 4x4
+        
+        # Classifier
+        Flatten(),
+        Linear(64 * 4 * 4, 256, device=device,
                gain_mean=gain_w, gain_var=gain_w),
         ReLU(),
-        Linear(512, num_classes, device=device,
+        Linear(256, num_classes, device=device,
                gain_mean=gain_w, gain_var=gain_w),
     ]
 
-    # ── Output head ──
+    # Output head
     if head == "remax":
         layers.append(Remax())
     elif head == "bernoulli":
-        layers.append(Bernoulli(n_gh=32))
+        layers.append(Bernoulli(n_gh=64))
     elif head in ("none", "logit"):
-        pass  # raw logits
+        pass
     else:
         raise ValueError(f"Unknown head: {head}")
 
@@ -127,6 +122,7 @@ def load_cifar10(data_dir="data"):
 # ======================================================================
 
 def evaluate(net, x_test, y_labels, batch_size=256):
+    net.eval()
     correct = 0
     for i in range(0, len(x_test), batch_size):
         xb = x_test[i:i + batch_size]
@@ -152,6 +148,7 @@ def train(net, x_train, y_train_oh, x_test, y_test_labels,
     for epoch in range(1, n_epochs + 1):
         t0 = time.perf_counter()
 
+        net.train()
         perm = torch.randperm(x_train.size(0), device=DEVICE)
         x_s = x_train[perm]
         y_s = y_train_oh[perm]
@@ -180,11 +177,11 @@ def train(net, x_train, y_train_oh, x_test, y_test_labels,
 
 def main():
     print("=" * 60)
-    print("  CIFAR-10 Classification — TAGI-Triton 3-Block CNN")
-    print("  Block 1: Conv(3→64) → Conv(64→64, s=2)")
-    print("  Block 2: Conv(64→128) → Conv(128→128, s=2)")
-    print("  Block 3: Conv(128→256) → Conv(256→256, s=2)")
-    print("  Head:    FC(4096→512) → FC(512→10) → Remax")
+    print("  CIFAR-10 Classification — TAGI-Triton Simple 3-CNN")
+    print("  Block 1: Conv(3→32,5) → BatchNorm → ReLU → Pool(2)")
+    print("  Block 2: Conv(32→64,5) → BatchNorm → ReLU → Pool(2)")
+    print("  Block 3: Conv(64→64,5) → BatchNorm → ReLU → Pool(2)")
+    print("  Head:    FC(1024→256) → FC(256→10) → Remax")
     print("=" * 60)
 
     if torch.cuda.is_available():
@@ -195,18 +192,20 @@ def main():
     print(f"  Train: {x_train.shape[0]:,}  |  Test: {x_test.shape[0]:,}")
     print(f"  Input shape: {x_train.shape[1:]}")
 
-    # ── Build 3-block CNN ──
-    net = build_3block_cnn(
-        num_classes=10, head="remax", device=DEVICE,
-        gain_w=0.5, gain_b=0.5,
+    # ── Build Simple 3-CNN ──
+    net = build_simple_3cnn(
+        num_classes=10, head="bernoulli", device=DEVICE,
+        gain_w=1.0, gain_b=1.0,
     )
+
+    # initialize_deep_network(net, gain_mu=2.0, gain_sigma=0.083, verbose=True)
 
     print(f"\n{net}")
     print(f"  Parameters: {net.num_parameters():,}")
 
     # ── Hyperparameters ──
     batch_size = 128
-    sigma_v    = 0.1
+    sigma_v    = 0.01
     n_epochs   = 50
 
     print(f"\n  Batch size : {batch_size}")

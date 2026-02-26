@@ -174,6 +174,9 @@ class Remax:
         """
         mu_a, Sa, cov_z_a = triton_remax(mz, Sz)
 
+        # Apply Cauchy–Schwarz inequality to cov_z_a
+        cov_z_a = torch.clamp(cov_z_a, -torch.sqrt(Sz * Sa), torch.sqrt(Sz * Sa))
+
         # Jacobian: J_k = cov(z_k, a_k) / Sz_k
         self.J = cov_z_a / torch.clamp(Sz, min=1e-7)
 
