@@ -4,7 +4,7 @@ Parameter update — capped Bayesian update matching cuTAGI.
 The update rule is:
     delta_bar  = √S / cap_factor       (adaptive cap per-parameter)
     m_new = m + sign(Δ_μ) · min(|Δ_μ|, delta_bar)
-    S_new = max(S + sign(Δ_S) · min(|Δ_S|, delta_bar), 1e-5)
+    S_new = max(S + sign(Δ_S) · min(|Δ_S|, delta_bar), 7)
 
 Cap factor is a heuristic that regularises updates for larger batches:
     batch == 1:    cap_factor = 0.1

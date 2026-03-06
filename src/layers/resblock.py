@@ -1,179 +1,423 @@
 """
-Bayesian Residual Block (BasicBlock) for TAGI.
+TAGI-compatible Residual Block — exact replica of cuTAGI's ResNetBlock.
 
-Implements the standard ResNet BasicBlock with skip connections:
+=======================================================================
+  cuTAGI ResNetBlock Logic  (resnet_block.cpp / resnet_block_cuda.cu)
+=======================================================================
 
-    Main path:  Conv3×3 → BN → ReLU → Conv3×3 → BN
-    Skip path:  identity  (or Conv1×1 → BN if dims change)
-    Output:     μ = μ_main + μ_skip,  S = S_main + S_skip  →  ReLU
+Forward:
+    1. Save a copy of the input (mu, var) for the shortcut path.
+    2. Main path: Conv→ReLU→BN→Conv→ReLU→BN   (6 sub-layers)
+    3. If projection shortcut:
+           shortcut path: Conv(k=2,s=2)→ReLU→BN  on saved input
+           output.mu += shortcut.mu ;  output.var += shortcut.var
+       Else (identity):
+           output.mu += saved_input.mu ;  output.var += saved_input.var
+    4. NO activation after the addition.
 
-The sum of independent Gaussians gives:
-    μ_out = μ_main + μ_skip
-    S_out = S_main + S_skip
+Backward:
+    1. Save a copy of the incoming deltas.
+    2. Main path backward (BN→ReLU→Conv→BN→ReLU→Conv, reversed).
+    3. If projection shortcut:
+           shortcut backward on saved deltas
+           output_delta += shortcut_delta   (simple sum)
+       Else (identity):
+           output_delta += saved_delta      (simple sum — no jcb scaling
+           needed because our layer-by-layer backward already handles
+           Jacobians; cuTAGI uses jcb scaling only because its layers
+           embed the previous layer's Jacobian into their backward.)
 
-The *external* ReLU after the residual add is included inside the block
-to keep the API clean (forward returns post-activation moments).
+=======================================================================
+  Architecture Details
+=======================================================================
+
+  Main path:  Conv2D(3×3, stride) → ReLU → BN → Conv2D(3×3) → ReLU → BN
+  Shortcut:   Identity   OR   Conv2D(2×2, stride=2) → ReLU → BN
+  Merge:      element-wise addition of moments (no post-activation)
+
+  A projection shortcut is used when stride > 1 or in_ch ≠ out_ch.
+  cuTAGI uses kernel_size=2 for the projection conv (NOT 1×1).
 """
 
 import torch
+import triton
+import triton.language as tl
 
 from .conv2d import Conv2D
 from .batchnorm2d import BatchNorm2D
 from .relu import ReLU
 
+BLOCK = 1024
+
+
+# ======================================================================
+#  Triton kernel — add_shortcut_mean_var (Forward)
+#
+#  Replicates cuTAGI's add_shortcut_mean_var_cuda:
+#      mu_a[i] += mu_s[i]
+#      var_a[i] += var_s[i]
+#
+#  In-place addition of the shortcut (or identity) moments to the
+#  main-path output.  Under the diagonal independence approximation
+#  the cross-covariance is zero, so variances simply add.
+# ======================================================================
+
+@triton.jit
+def _add_shortcut_mean_var_kernel(
+    mu_s_ptr, var_s_ptr,
+    mu_a_ptr, var_a_ptr,
+    n_elements,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    valid = offs < n_elements
+
+    mu_s = tl.load(mu_s_ptr  + offs, mask=valid, other=0.0)
+    var_s = tl.load(var_s_ptr + offs, mask=valid, other=0.0)
+    mu_a = tl.load(mu_a_ptr  + offs, mask=valid, other=0.0)
+    var_a = tl.load(var_a_ptr + offs, mask=valid, other=0.0)
+
+    mu_a += mu_s
+    var_a += var_s
+
+    tl.store(mu_a_ptr  + offs, mu_a,  mask=valid)
+    tl.store(var_a_ptr + offs, var_a, mask=valid)
+
+
+# ======================================================================
+#  Triton kernel — Delta Merge (Backward)
+#
+#  Replicates cuTAGI's add_shortcut_mean_var_cuda used for deltas:
+#      delta_mu_out[i]  += delta_mu_skip[i]
+#      delta_var_out[i] += delta_var_skip[i]
+#
+#  When deltas from the main and shortcut backward paths arrive at
+#  the same input, they are summed element-wise.
+# ======================================================================
+
+@triton.jit
+def _delta_merge_kernel(
+    # Deltas from skip/projection path (to add)
+    d_mu_skip_ptr, d_var_skip_ptr,
+    # Deltas from main path (read-modify-write)
+    d_mu_out_ptr, d_var_out_ptr,
+    n_elements,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    valid = offs < n_elements
+
+    d_mu_skip = tl.load(d_mu_skip_ptr  + offs, mask=valid, other=0.0)
+    d_var_skip = tl.load(d_var_skip_ptr + offs, mask=valid, other=0.0)
+    d_mu_out = tl.load(d_mu_out_ptr    + offs, mask=valid, other=0.0)
+    d_var_out = tl.load(d_var_out_ptr   + offs, mask=valid, other=0.0)
+
+    d_mu_out += d_mu_skip
+    d_var_out += d_var_skip
+
+    tl.store(d_mu_out_ptr  + offs, d_mu_out,  mask=valid)
+    tl.store(d_var_out_ptr + offs, d_var_out, mask=valid)
+
+
+# ======================================================================
+#  Python wrappers
+# ======================================================================
+
+def triton_add_shortcut(mu_s, var_s, mu_a, var_a):
+    """
+    In-place addition: mu_a += mu_s, var_a += var_s  (Triton-accelerated).
+    Matches cuTAGI's add_shortcut_mean_var_cuda.
+    """
+    assert mu_s.shape == mu_a.shape, \
+        f"Shape mismatch: shortcut={mu_s.shape} vs output={mu_a.shape}"
+    n = mu_s.numel()
+    grid = (triton.cdiv(n, BLOCK),)
+    _add_shortcut_mean_var_kernel[grid](
+        mu_s.contiguous(), var_s.contiguous(),
+        mu_a, var_a,
+        n, BLOCK=BLOCK,
+    )
+    # mu_a, var_a modified in place
+
+
+def triton_delta_merge(d_mu_skip, d_var_skip, d_mu_out, d_var_out):
+    """
+    In-place delta merge: d_mu_out += d_mu_skip, d_var_out += d_var_skip.
+    Matches cuTAGI's backward add_shortcut_mean_var_cuda.
+    """
+    assert d_mu_skip.shape == d_mu_out.shape, \
+        f"Shape mismatch: skip={d_mu_skip.shape} vs out={d_mu_out.shape}"
+    n = d_mu_skip.numel()
+    grid = (triton.cdiv(n, BLOCK),)
+    _delta_merge_kernel[grid](
+        d_mu_skip.contiguous(), d_var_skip.contiguous(),
+        d_mu_out, d_var_out,
+        n, BLOCK=BLOCK,
+    )
+    # d_mu_out, d_var_out modified in place
+
+
+# ======================================================================
+#  Add Layer — kept for backward compatibility / standalone use
+# ======================================================================
+
+class Add:
+    """
+    TAGI-compatible element-wise addition of two Gaussian streams.
+
+    Forward:   μ_S = μ_Z + μ_X,   Σ_S = Σ_Z + Σ_X
+    Backward:  deltas duplicated to both branches (Jacobian = 1).
+    """
+
+    def __init__(self):
+        pass
+
+    def forward(self, mu_z, var_z, mu_x, var_x):
+        assert mu_z.shape == mu_x.shape
+        mu_s = mu_z.clone()
+        var_s = var_z.clone()
+        triton_add_shortcut(mu_x, var_x, mu_s, var_s)
+        return mu_s, var_s
+
+    def backward(self, delta_mu_s, delta_var_s):
+        d_mu_z = delta_mu_s.clone()
+        d_var_z = delta_var_s.clone()
+        d_mu_x = delta_mu_s.clone()
+        d_var_x = delta_var_s.clone()
+        return (d_mu_z, d_var_z), (d_mu_x, d_var_x)
+
+    def __repr__(self):
+        return "Add()"
+
+
+# ======================================================================
+#  ResBlock — exact replica of cuTAGI's ResNetBlock
+# ======================================================================
 
 class ResBlock:
     """
-    TAGI BasicBlock with residual skip connection.
+    TAGI Residual Block — replicates cuTAGI's ResNetBlock logic exactly.
+
+    Architecture (from cuTAGI test_utils.cpp create_layer_block):
+    ─────────────────────────────────────────────────────────────
+    Main path:
+        Conv2D(in_ch, out_ch, 3×3, stride, pad=1)
+        → ReLU
+        → BatchNorm2D(out_ch)
+        → Conv2D(out_ch, out_ch, 3×3, stride=1, pad=1)
+        → ReLU
+        → BatchNorm2D(out_ch)
+
+    Shortcut path (projection, when stride>1 or ch mismatch):
+        Conv2D(in_ch, out_ch, 2×2, stride=2, pad=0)
+        → ReLU
+        → BatchNorm2D(out_ch)
+
+    Shortcut path (identity, otherwise):
+        pass-through
+
+    Merge:
+        output = main_output + shortcut_output     (no post-activation)
 
     Parameters
     ----------
-    C_in    : int   input channels
-    C_out   : int   output channels
-    stride  : int   stride for the first conv (1 or 2)
-    device  : str or torch.device
+    in_channels  : int
+    out_channels : int
+    stride       : int  (default 1)
+    device       : str  (default "cuda")
+    gain_w, gain_b : float  (default 1.0)
     """
 
-    def __init__(self, C_in, C_out, stride=1, device="cuda", gain_w=1.0, gain_b=1.0):
-        self.C_in = C_in
-        self.C_out = C_out
+    def __init__(self, in_channels, out_channels, stride=1,
+                 device="cuda", gain_w=1.0, gain_b=1.0):
+        self.in_channels = in_channels
+        self.out_channels = out_channels
         self.stride = stride
-        self.device = torch.device(device)
+        self.device = device
+        self.training = True
 
-        # ── Main path ──
-        self.conv1 = Conv2D(C_in, C_out, 3, stride=stride, padding=1, device=device, gain_w=gain_w, gain_b=gain_b)
-        self.bn1   = BatchNorm2D(C_out, device=device)
+        # ── Main path: Conv→ReLU→BN→Conv→ReLU→BN ──
+        self.conv1 = Conv2D(in_channels, out_channels, kernel_size=3,
+                            stride=stride, padding=1, device=device,
+                            gain_w=gain_w, gain_b=gain_b)
         self.relu1 = ReLU()
+        self.bn1 = BatchNorm2D(out_channels, device=device,
+                               gain_w=gain_w, gain_b=gain_b,
+                               preserve_var=False)
 
-        self.conv2 = Conv2D(C_out, C_out, 3, stride=1, padding=1, device=device, gain_w=gain_w, gain_b=gain_b)
-        self.bn2   = BatchNorm2D(C_out, device=device)
+        self.conv2 = Conv2D(out_channels, out_channels, kernel_size=3,
+                            stride=1, padding=1, device=device,
+                            gain_w=gain_w, gain_b=gain_b)
+        self.relu2 = ReLU()
+        self.bn2 = BatchNorm2D(out_channels, device=device,
+                               gain_w=gain_w, gain_b=gain_b,
+                               preserve_var=False)
 
-        # ── Skip path (projection if dimensions change) ──
-        self.has_proj = (stride != 1 or C_in != C_out)
-        if self.has_proj:
-            self.proj_conv = Conv2D(C_in, C_out, 1, stride=stride, padding=0,
-                                    device=device, gain_w=gain_w, gain_b=gain_b)
-            self.proj_bn = BatchNorm2D(C_out, device=device)
+        # Ordered sub-layer list for main path
+        self._main_layers = [self.conv1, self.relu1, self.bn1,
+                             self.conv2, self.relu2, self.bn2]
+
+        # ── Shortcut path ──
+        self.use_projection = (stride != 1) or (in_channels != out_channels)
+        if self.use_projection:
+            # cuTAGI uses kernel_size=2, stride=2, no bias, then ReLU→BN
+            self.proj_conv = Conv2D(in_channels, out_channels, kernel_size=2,
+                                    stride=stride, padding=0, device=device,
+                                    gain_w=gain_w, gain_b=gain_b)
+            self.proj_relu = ReLU()
+            self.proj_bn = BatchNorm2D(out_channels, device=device,
+                                       gain_w=gain_w, gain_b=gain_b,
+                                       preserve_var=False)
+            self._proj_layers = [self.proj_conv, self.proj_relu, self.proj_bn]
         else:
             self.proj_conv = None
+            self.proj_relu = None
             self.proj_bn = None
+            self._proj_layers = []
 
-        # ── Post-add ReLU ──
-        self.relu_out = ReLU()
+        # ── All learnable sub-layers (Conv2D, BatchNorm2D) ──
+        self._learnable = [self.conv1, self.bn1, self.conv2, self.bn2]
+        if self.use_projection:
+            self._learnable.extend([self.proj_conv, self.proj_bn])
 
     # ------------------------------------------------------------------
-    #  Forward
+    #  Train / Eval
     # ------------------------------------------------------------------
-    def forward(self, ma, Sa):
+    def train(self):
+        self.training = True
+        for layer in self._learnable:
+            if hasattr(layer, 'train'):
+                layer.train()
+
+    def eval(self):
+        self.training = False
+        for layer in self._learnable:
+            if hasattr(layer, 'eval'):
+                layer.eval()
+
+    # ------------------------------------------------------------------
+    #  Forward — replicates ResNetBlockCuda::forward exactly
+    # ------------------------------------------------------------------
+    def forward(self, mu_in, var_in):
         """
-        Parameters
-        ----------
-        ma : Tensor (N, C_in, H, W)   activation means
-        Sa : Tensor (N, C_in, H, W)   activation variances
+        Forward pass through the residual block.
 
-        Returns
-        -------
-        ma_out : Tensor (N, C_out, H', W')  post-ReLU means
-        Sa_out : Tensor (N, C_out, H', W')  post-ReLU variances
+        cuTAGI logic:
+            1. Save copy of input for shortcut.
+            2. Main path forward.
+            3. Add shortcut (projection or identity) to main output.
+            4. No post-activation.
         """
-        # ── Main path ──
-        m1, S1 = self.conv1.forward(ma, Sa)
-        m1, S1 = self.bn1.forward(m1, S1)
-        m1, S1 = self.relu1.forward(m1, S1)
+        # Save input for shortcut path (like cuTAGI's input_z->copy_from)
+        mu_skip = mu_in.clone()
+        var_skip = var_in.clone()
 
-        m2, S2 = self.conv2.forward(m1, S1)
-        m2, S2 = self.bn2.forward(m2, S2)
+        # ── Main path: Conv→ReLU→BN→Conv→ReLU→BN ──
+        mu_z, var_z = mu_in, var_in
+        for layer in self._main_layers:
+            mu_z, var_z = layer.forward(mu_z, var_z)
 
-        # ── Skip path ──
-        if self.has_proj:
-            ms, Ss = self.proj_conv.forward(ma, Sa)
-            ms, Ss = self.proj_bn.forward(ms, Ss)
+        # ── Shortcut path ──
+        if self.use_projection:
+            mu_x, var_x = mu_skip, var_skip
+            for layer in self._proj_layers:
+                mu_x, var_x = layer.forward(mu_x, var_x)
         else:
-            ms, Ss = ma, Sa
+            mu_x, var_x = mu_skip, var_skip
 
-        # ── Residual addition (sum of independent Gaussians) ──
-        m_add = m2 + ms
-        S_add = S2 + Ss
+        # ── Merge: output += shortcut (in-place, like cuTAGI) ──
+        triton_add_shortcut(mu_x, var_x, mu_z, var_z)
 
-        # ── Post-add ReLU ──
-        ma_out, Sa_out = self.relu_out.forward(m_add, S_add)
-
-        return ma_out, Sa_out
+        # No activation after the addition (cuTAGI has none)
+        return mu_z, var_z
 
     # ------------------------------------------------------------------
-    #  Backward
+    #  Backward — replicates ResNetBlockCuda::backward exactly
     # ------------------------------------------------------------------
-    def backward(self, delta_ma, delta_Sa):
+    def backward(self, delta_mu, delta_var):
         """
-        Parameters
-        ----------
-        delta_ma : Tensor (N, C_out, H', W')  mean delta
-        delta_Sa : Tensor (N, C_out, H', W')  variance delta
+        Backward pass through the residual block.
 
-        Returns
-        -------
-        delta_m_in : Tensor (N, C_in, H, W)   mean delta to propagate
-        delta_S_in : Tensor (N, C_in, H, W)   variance delta to propagate
+        cuTAGI logic:
+            1. Save copy of incoming deltas for shortcut backward.
+            2. Main path backward.
+            3. If projection:  shortcut backward → add to main deltas.
+               If identity:    add saved deltas directly to main deltas.
+            4. Return merged deltas.
+
+        Note: cuTAGI's identity backward uses jcb scaling:
+            delta_mu_out += delta_mu_saved * jcb_input
+            delta_var_out += delta_var_saved * jcb_input²
+        In our framework, each layer's backward already applies its own
+        Jacobian, so the identity shortcut is a simple addition (jcb=1.0
+        effectively, since the reset-to-1 after the add means these deltas
+        start with jcb=1.0).
         """
-        # ── Post-add ReLU backward ──
-        dm, dS = self.relu_out.backward(delta_ma, delta_Sa)
+        # ── Split incoming deltas to both branches (no scaling) ──
+        # The forward is a plain addition: out = main + skip
+        # Both branches receive the full incoming delta (Jacobian = 1).
+        d_mu_main = delta_mu.clone()
+        d_var_main = delta_var.clone()
+        
+        d_mu_skip = delta_mu.clone()
+        d_var_skip = delta_var.clone()
 
-        # ── Main path backward ──
-        # The add splits deltas equally to both branches
-        dm_main, dS_main = dm, dS
+        # ── Main path backward (reversed) ──
+        for layer in reversed(self._main_layers):
+            d_mu_main, d_var_main = layer.backward(d_mu_main, d_var_main)
 
-        # BN2 backward
-        dm_main, dS_main = self.bn2.backward(dm_main, dS_main)
-        # Conv2 backward
-        dm_main, dS_main = self.conv2.backward(dm_main, dS_main)
-        # ReLU1 backward
-        dm_main, dS_main = self.relu1.backward(dm_main, dS_main)
-        # BN1 backward
-        dm_main, dS_main = self.bn1.backward(dm_main, dS_main)
-        # Conv1 backward
-        dm_main, dS_main = self.conv1.backward(dm_main, dS_main)
+        # ── Shortcut path backward ──
+        if self.use_projection:
+            for layer in reversed(self._proj_layers):
+                d_mu_skip, d_var_skip = layer.backward(d_mu_skip, d_var_skip)
 
-        # ── Skip path backward ──
-        dm_skip, dS_skip = dm, dS
+        # ── Delta merge: main_delta += shortcut_delta (in-place) ──
+        triton_delta_merge(d_mu_skip, d_var_skip, d_mu_main, d_var_main)
 
-        if self.has_proj:
-            dm_skip, dS_skip = self.proj_bn.backward(dm_skip, dS_skip)
-            dm_skip, dS_skip = self.proj_conv.backward(dm_skip, dS_skip)
-
-        # ── Combine (sum of deltas from both paths) ──
-        return dm_main + dm_skip, dS_main + dS_skip
+        return d_mu_main, d_var_main
 
     # ------------------------------------------------------------------
     #  Update
     # ------------------------------------------------------------------
     def update(self, cap_factor):
         """Apply capped parameter updates to all learnable sub-layers."""
-        self.conv1.update(cap_factor)
-        self.bn1.update(cap_factor)
-        self.conv2.update(cap_factor)
-        self.bn2.update(cap_factor)
-        if self.has_proj:
-            self.proj_conv.update(cap_factor)
-            self.proj_bn.update(cap_factor)
+        for layer in self._learnable:
+            layer.update(cap_factor)
 
     # ------------------------------------------------------------------
-    #  Train / Eval mode
+    #  Properties for Sequential compatibility
     # ------------------------------------------------------------------
-    def train(self):
-        """Set all BatchNorm layers to training mode."""
-        self.bn1.train()
-        self.bn2.train()
-        if self.has_proj and self.proj_bn is not None:
-            self.proj_bn.train()
+    @property
+    def mw(self):
+        return self.conv1.mw
 
-    def eval(self):
-        """Set all BatchNorm layers to evaluation mode."""
-        self.bn1.eval()
-        self.bn2.eval()
-        if self.has_proj and self.proj_bn is not None:
-            self.proj_bn.eval()
+    @mw.setter
+    def mw(self, value):
+        self.conv1.mw = value
+
+    @property
+    def Sw(self):
+        return self.conv1.Sw
+
+    @property
+    def mb(self):
+        return self.conv1.mb
+
+    @property
+    def Sb(self):
+        return self.conv1.Sb
+
+    def num_sub_parameters(self):
+        """Count total learnable scalars across all sub-layers."""
+        total = 0
+        for layer in self._learnable:
+            if hasattr(layer, 'mw'):
+                total += layer.mw.numel() + layer.mb.numel()
+        return total * 2  # means + variances
 
     def __repr__(self):
-        proj_str = " + proj" if self.has_proj else ""
-        return (f"ResBlock({self.C_in}→{self.C_out}, "
-                f"stride={self.stride}{proj_str})")
+        proj = "projection" if self.use_projection else "identity"
+        return (f"ResBlock({self.in_channels}→{self.out_channels}, "
+                f"stride={self.stride}, skip={proj})")

@@ -3,7 +3,7 @@ Bayesian AvgPool2D layer for TAGI.
 
 Average pooling for both means and variances:
     μ_out = (1/k²) · Σ μ_in       (within each k×k window)
-    S_out = (1/k⁴) · Σ S_in       (variance scales as 1/k⁴ for avg of k² terms)
+    S_out = (1/k²) · Σ S_in       (Assuming high spatial correlation, variance scales as 1/k²)
 
 All computation done in a single fused Triton kernel per direction.
 """
@@ -23,7 +23,7 @@ BLOCK = 1024
 def _avg_pool_fwd_kernel(
     ma_ptr, Sa_ptr, ma_out_ptr, Sa_out_ptr,
     N, C, H, W, H_out, W_out,
-    k, inv_k2, inv_k4,
+    k, inv_k2, 
     BLOCK: tl.constexpr,
 ):
     """Fused avg-pool for mean and variance in one kernel."""
@@ -52,8 +52,9 @@ def _avg_pool_fwd_kernel(
             sum_m += m
             sum_s += s
 
+    # Both mean and variance use inv_k2 due to spatial correlation
     tl.store(ma_out_ptr + offs, sum_m * inv_k2, mask=valid)
-    tl.store(Sa_out_ptr + offs, sum_s * inv_k4, mask=valid)
+    tl.store(Sa_out_ptr + offs, sum_s * inv_k2, mask=valid)
 
 
 # ======================================================================
@@ -64,7 +65,7 @@ def _avg_pool_fwd_kernel(
 def _avg_pool_bwd_kernel(
     dm_ptr, ds_ptr, dm_out_ptr, ds_out_ptr,
     N, C, H, W, H_out, W_out,
-    k, inv_k2, inv_k4,
+    k, inv_k2,
     BLOCK: tl.constexpr,
 ):
     """Backward: distribute delta equally into k×k block."""
@@ -86,8 +87,9 @@ def _avg_pool_bwd_kernel(
     dm = tl.load(dm_ptr + idx, mask=valid, other=0.0)
     ds = tl.load(ds_ptr + idx, mask=valid, other=0.0)
 
+    # Both mean and variance gradients use inv_k2
     tl.store(dm_out_ptr + offs, dm * inv_k2, mask=valid)
-    tl.store(ds_out_ptr + offs, ds * inv_k4, mask=valid)
+    tl.store(ds_out_ptr + offs, ds * inv_k2, mask=valid)
 
 
 # ======================================================================
@@ -132,7 +134,7 @@ class AvgPool2D:
         _avg_pool_fwd_kernel[(triton.cdiv(total, BLOCK),)](
             ma, Sa, ma_out, Sa_out,
             N, C, H, W, H_out, W_out,
-            k, 1.0 / (k * k), 1.0 / (k ** 4),
+            k, 1.0 / (k * k),
             BLOCK=BLOCK,
         )
         return ma_out, Sa_out
@@ -160,7 +162,7 @@ class AvgPool2D:
         _avg_pool_bwd_kernel[(triton.cdiv(total, BLOCK),)](
             dm, ds, dm_out, ds_out,
             N, C, H, W, H_out, W_out,
-            k, 1.0 / (k * k), 1.0 / (k ** 4),
+            k, 1.0 / (k * k),
             BLOCK=BLOCK,
         )
         return dm_out, ds_out

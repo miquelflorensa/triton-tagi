@@ -39,7 +39,7 @@ def _remax_kernel(
     offs = tl.arange(0, BLOCK_K)
     mask = offs < K
 
-    EPS          : tl.constexpr = 1e-7
+    EPS          : tl.constexpr = 1e-9
     INV_SQRT_2PI : tl.constexpr = 0.3989422804014327
     INV_SQRT_2   : tl.constexpr = 0.7071067811865476
 
@@ -49,17 +49,55 @@ def _remax_kernel(
     sig_z    = tl.sqrt(tl.maximum(sig_z_sq, 0.0))
     safe_sig = tl.maximum(sig_z, EPS)
 
-    # ── alpha = mu / sigma,  phi(alpha), Phi(alpha) ──
-    alpha = mu_z / safe_sig
-    phi_a = tl.exp(-0.5 * alpha * alpha) * INV_SQRT_2PI
-    Phi_a = 0.5 + 0.5 * tl.math.erf(alpha * INV_SQRT_2)
+    # # ── alpha = mu / sigma,  phi(alpha), Phi(alpha) ──
+    # alpha = mu_z / safe_sig
+    # phi_a = tl.exp(-0.5 * alpha * alpha) * INV_SQRT_2PI
+    # Phi_a = 0.5 + 0.5 * tl.math.erf(alpha * INV_SQRT_2)
 
-    # ── 1. ReLU moments  M = max(0, Z) ──
-    mu_m     = tl.maximum(sig_z * phi_a + mu_z * Phi_a, EPS)
-    sig_m_sq = tl.maximum(
-        (mu_z * mu_z + sig_z_sq) * Phi_a + mu_z * sig_z * phi_a - mu_m * mu_m,
-        EPS)
-    cov_z_m  = sig_z_sq * Phi_a
+    # # ── 1. ReLU moments  M = max(0, Z) ──
+    # mu_m     = tl.maximum(sig_z * phi_a + mu_z * Phi_a, EPS)
+    # sig_m_sq = tl.maximum(
+    #     (mu_z * mu_z + sig_z_sq) * Phi_a + mu_z * sig_z * phi_a - mu_m * mu_m,
+    #     EPS)
+    # cov_z_m  = sig_z_sq * Phi_a
+
+
+    # ── 1. Softplus moments M = Softplus(Z) ──
+    # Stable Sigmoid (Triton has a built-in for this which handles extremes)
+    tmp = tl.sigmoid(mu_z)
+
+    # Stable Softplus: log(1 + exp(x)) is practically just x for large positive x.
+    # We switch to linear at mu_z > 20.0 to prevent tl.exp() from overflowing to inf.
+    softplus_base = tl.where(mu_z > 20.0, mu_z, tl.log(1.0 + tl.exp(mu_z)))
+
+    # Second-order correction to the mean
+    mu_m = softplus_base + 0.5 * sig_z_sq * tmp * (1.0 - tmp)
+    
+    # CRITICAL: Hard floor mu_m to EPS. If it hits exactly 0, log(mu_m) becomes -inf
+    # and division by (mu_m * mu_m) yields inf.
+    mu_m = tl.maximum(mu_m, EPS) 
+
+    # Covariance and Variance
+    cov_z_m = tmp * sig_z_sq
+    sig_m_sq = tl.maximum(tmp * sig_z_sq * tmp, EPS) # Floor this too
+
+    # # ── 1. Gaussian CDF (Probit) moments M = Phi(Z) ──
+    # # First, we calculate the variance-adjusted mean (alpha).
+    # # E[Phi(Z)] = Phi(mu / sqrt(1 + sigma^2))
+    # denom = tl.sqrt(1.0 + sig_z_sq)
+    # alpha = mu_z / denom
+
+    # # Mean of M:
+    # mu_m = 0.5 + 0.5 * tl.math.erf(alpha * INV_SQRT_2)
+    # # CRITICAL: CDF can hit exactly 0.0 in float32. We must floor it so log(mu_m) survives.
+    # mu_m = tl.maximum(mu_m, EPS)
+
+    # # Covariance cov(Z, M): derived via Stein's Lemma -> E[f'(Z)] * Var(Z)
+    # # f'(Z) is the Gaussian PDF (phi)
+    # phi_alpha = INV_SQRT_2PI * tl.exp(-0.5 * alpha * alpha)
+    # cov_z_m = sig_z_sq * phi_alpha / denom
+    # sig_m_sq = tl.maximum((sig_z_sq * phi_alpha * phi_alpha) / (1.0 + sig_z_sq), EPS)
+
 
     # ── 2. log-space moments of M ──
     sig_ln_m_sq = tl.log(1.0 + sig_m_sq / (mu_m * mu_m))

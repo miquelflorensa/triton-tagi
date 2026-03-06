@@ -33,18 +33,21 @@ class TAGILayer(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         
-        # --- Initialize Parameters ---
+        # --- Initialize Parameters (He initialization) ---
         # We use nn.Parameter to register them, but we will update them manually.
         
-        # Mean of weights (mw) ~ N(0, 1/sqrt(in))
-        self.mw = nn.Parameter(torch.randn(in_features, out_features) / np.sqrt(in_features))
-        # Variance of weights (Sw) ~ Initialized to small positive value
-        self.Sw = nn.Parameter(torch.full((in_features, out_features), 1.0 / in_features))
+        # He init: scale = sqrt(1 / fan_in)
+        scale = np.sqrt(1.0 / in_features)
+        
+        # Mean of weights (mw) ~ N(0, scale)
+        self.mw = nn.Parameter(torch.randn(in_features, out_features) * scale)
+        # Variance of weights (Sw) = scale^2
+        self.Sw = nn.Parameter(torch.full((in_features, out_features), scale ** 2))
         
         # Mean of biases (mb)
         self.mb = nn.Parameter(torch.zeros(1, out_features))
-        # Variance of biases (Sb)
-        self.Sb = nn.Parameter(torch.full((1, out_features), 0.01))
+        # Variance of biases (Sb) = scale^2
+        self.Sb = nn.Parameter(torch.full((1, out_features), scale ** 2))
 
     def forward(self, ma, Sa):
         """

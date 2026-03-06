@@ -42,6 +42,7 @@ import triton
 import triton.language as tl
 
 from ..update.parameters import update_parameters
+from ..param_init import init_weight_bias_norm
 
 BLOCK = 1024
 
@@ -224,24 +225,25 @@ class BatchNorm2D:
     device       : str or torch.device
     """
 
-    def __init__(self, num_features, momentum=0.1, eps=1e-5, device="cuda"):
+    def __init__(self, num_features, momentum=0.1, eps=1e-5, device="cuda",
+                 gain_w=1.0, gain_b=1.0, preserve_var=True):
         self.num_features = num_features
         self.momentum = momentum
         self.eps = eps
         self.device = torch.device(device)
         self.training = True
+        self.preserve_var = preserve_var
+        
+        # Flag for data-dependent initialization
+        self._is_initialized = False
 
-        # --- Learnable parameters: gamma (scale) ---
-        # γ ~ N(μ_γ, S_γ)  initialised to γ ≈ 1
-        self.mw = torch.ones(num_features, device=self.device)    # μ_γ
-        self.Sw = torch.full((num_features,), 1e-4,
-                             device=self.device)                   # S_γ
-
-        # --- Learnable parameters: beta (shift) ---
-        # β ~ N(μ_β, S_β)  initialised to β ≈ 0
-        self.mb = torch.zeros(num_features, device=self.device)   # μ_β
-        self.Sb = torch.full((num_features,), 1e-4,
-                             device=self.device)                   # S_β
+        # --- Base initialization (will be refined on first pass) ---
+        self.mw = torch.ones(num_features, device=self.device)
+        # Keep Sw small to prevent massive uncertainty injection at the BN layer
+        self.Sw = torch.full((num_features,), 1e-3, device=self.device)
+        
+        self.mb = torch.zeros(num_features, device=self.device)
+        self.Sb = torch.full((num_features,), 1e-3, device=self.device)
         self.has_bias = True
 
         # --- Running statistics ---
@@ -249,15 +251,15 @@ class BatchNorm2D:
         self.running_var  = torch.ones(num_features, device=self.device)
 
         # --- Saved for backward ---
-        self.m_hat = None       # normalised means   (N, C, H, W)
-        self.S_hat = None       # normalised vars    (N, C, H, W)
+        self.m_hat = None       
+        self.S_hat = None       
         self.input_shape = None
 
         # --- Parameter deltas ---
-        self.delta_mw = None    # Δ_μ_γ
-        self.delta_Sw = None    # Δ_S_γ
-        self.delta_mb = None    # Δ_μ_β
-        self.delta_Sb = None    # Δ_S_β
+        self.delta_mw = None    
+        self.delta_Sw = None    
+        self.delta_mb = None    
+        self.delta_Sb = None
 
     # ------------------------------------------------------------------
     #  Helpers
@@ -311,10 +313,24 @@ class BatchNorm2D:
         )
         batch_var = batch_var + (batch_mean_sq - batch_mean * batch_mean)
 
-        # EMA update
-        alpha = self.momentum
-        self.running_mean = (1 - alpha) * self.running_mean + alpha * batch_mean
-        self.running_var  = (1 - alpha) * self.running_var  + alpha * batch_var
+        # --- THE FIX: Bypass EMA on Step 0 ---
+        if not self._is_initialized:
+            # Force running stats to perfectly match the first batch
+            self.running_mean = batch_mean.clone()
+            self.running_var  = batch_var.clone()
+            
+            if self.preserve_var:
+                # Stem / standalone BN: set gamma to preserve incoming variance
+                # μ_γ = √(σ²_batch + ε)  cancels the normalisation denominator
+                self.mw = torch.sqrt(self.running_var + self.eps).clone()
+            # else: keep μ_γ = 1.0 (ResBlock BN — normalise to unit variance)
+            
+            self._is_initialized = True
+        else:
+            # EMA update for all subsequent batches
+            alpha = self.momentum
+            self.running_mean = (1 - alpha) * self.running_mean + alpha * batch_mean
+            self.running_var  = (1 - alpha) * self.running_var  + alpha * batch_var
 
     # ------------------------------------------------------------------
     #  Forward

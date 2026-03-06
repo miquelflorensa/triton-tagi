@@ -233,10 +233,12 @@ class TritonTAGIConv2D:
         self.stride, self.padding = stride, padding
         K = C_in * self.kH * self.kW
 
-        self.mw = torch.randn(K, C_out, device=device) / np.sqrt(K)
-        self.Sw = torch.full((K, C_out), 1.0 / K, device=device)
+        # He initialization: scale = sqrt(1 / fan_in)
+        scale = np.sqrt(1.0 / K)
+        self.mw = torch.randn(K, C_out, device=device) * scale
+        self.Sw = torch.full((K, C_out), scale ** 2, device=device)
         self.mb = torch.zeros(1, C_out, device=device)
-        self.Sb = torch.full((1, C_out), 0.01, device=device)
+        self.Sb = torch.full((1, C_out), scale ** 2, device=device)
 
     def forward(self, ma, Sa):
         N, C, H, W = ma.shape
@@ -419,182 +421,6 @@ class TritonTAGICNN:
 
 
 # ====================================================================
-# TAGI Residual Block
-# ====================================================================
-
-class TritonTAGIResBlock:
-    """
-    BasicBlock for TAGI ResNet:
-      main: Conv3×3 → BayesReLU → Conv3×3
-      skip: identity or Conv1×1 (projection)
-      out:  m = m_main + m_skip,  S = S_main + S_skip
-    The *external* ReLU after the add is handled by the parent network.
-    """
-    def __init__(self, C_in, C_out, stride=1, device="cuda"):
-        self.C_in, self.C_out, self.stride = C_in, C_out, stride
-        self.device = device
-        # Main path
-        self.conv1 = TritonTAGIConv2D(C_in,  C_out, 3, stride, 1, device)
-        self.conv2 = TritonTAGIConv2D(C_out, C_out, 3, 1,      1, device)
-        # Skip projection (when dims change)
-        self.proj = (TritonTAGIConv2D(C_in, C_out, 1, stride, 0, device)
-                     if (stride != 1 or C_in != C_out) else None)
-
-    def forward(self, ma, Sa):
-        self.ma_in, self.Sa_in = ma, Sa
-
-        # ── main path ──
-        m1, S1 = self.conv1.forward(ma, Sa)
-        # Internal BayesReLU between the two convs
-        N, C, H, W = m1.shape
-        m1r, S1r, J1 = triton_relu_moments(m1.reshape(-1), S1.reshape(-1))
-        m1r = m1r.view(N, C, H, W)
-        S1r = S1r.view(N, C, H, W)
-        self.J1 = J1.view(N, C, H, W)
-
-        m2, S2 = self.conv2.forward(m1r, S1r)
-
-        # ── skip path ──
-        if self.proj is not None:
-            ms, Ss = self.proj.forward(ma, Sa)
-        else:
-            ms, Ss = ma, Sa
-
-        # ── sum of independent Gaussians ──
-        return m2 + ms, S2 + Ss
-
-    def backward(self, delta_m, delta_S):
-        """
-        delta_m / delta_S arrive here already multiplied by the
-        *external* ReLU Jacobian (done by the parent network).
-        We just need to route them through both the main and skip paths.
-        """
-        # ── main path ──
-        # Conv2 backward
-        dm2, dS2 = self.conv2.backward(delta_m, delta_S)
-        # Internal ReLU Jacobian (between conv1 and conv2)
-        dm2 = dm2 * self.J1
-        dS2 = dS2 * self.J1 * self.J1
-        # Conv1 backward
-        dm1, dS1 = self.conv1.backward(dm2, dS2)
-
-        # ── skip path ──
-        if self.proj is not None:
-            dms, dSs = self.proj.backward(delta_m, delta_S)
-        else:
-            dms, dSs = delta_m, delta_S
-
-        return dm1 + dms, dS1 + dSs
-
-
-# ====================================================================
-# TAGI ResNet-18  (CIFAR-10 variant, 32×32 input)
-# ====================================================================
-
-class TritonTAGIResNet18:
-    """
-    ResNet-18 adapted for CIFAR-10 (32×32):
-      Stem:    Conv(3→64, 3×3, s=1)       → 32×32   [no 7×7 / maxpool]
-      Layer1:  2× BasicBlock(64→64,  s=1) → 32×32
-      Layer2:  2× BasicBlock(64→128, s=2) → 16×16
-      Layer3:  2× BasicBlock(128→256,s=2) →  8×8
-      Layer4:  2× BasicBlock(256→512,s=2) →  4×4
-      Head:    AvgPool(4) → FC(512→10)
-    """
-    def __init__(self, num_classes=10, device="cuda"):
-        self.device = device
-        ch = [64, 64, 128, 256, 512]
-
-        self.stem_conv = TritonTAGIConv2D(3, ch[0], 3, 1, 1, device)
-        # stem ReLU stored as a flag (handled in forward via triton_relu_moments)
-
-        self.res_blocks = [
-            # Layer 1
-            TritonTAGIResBlock(ch[0], ch[1], stride=1, device=device),
-            TritonTAGIResBlock(ch[1], ch[1], stride=1, device=device),
-            # Layer 2
-            TritonTAGIResBlock(ch[1], ch[2], stride=2, device=device),
-            TritonTAGIResBlock(ch[2], ch[2], stride=1, device=device),
-            # Layer 3
-            TritonTAGIResBlock(ch[2], ch[3], stride=2, device=device),
-            TritonTAGIResBlock(ch[3], ch[3], stride=1, device=device),
-            # Layer 4
-            TritonTAGIResBlock(ch[3], ch[4], stride=2, device=device),
-            TritonTAGIResBlock(ch[4], ch[4], stride=1, device=device),
-        ]
-
-        self.pool_k = 4          # global avg pool → 1×1
-        self.fc = TritonTAGILayer(ch[4], num_classes, device)   # FC head
-
-    def forward(self, x):
-        # Stem
-        ms, Ss = self.stem_conv.forward(x, torch.zeros_like(x))
-        N, C, H, W = ms.shape
-        ms_r, Ss_r, Js = triton_relu_moments(ms.reshape(-1), Ss.reshape(-1))
-        ms_r = ms_r.view(N, C, H, W)
-        Ss_r = Ss_r.view(N, C, H, W)
-        self.stem_J = Js.view(N, C, H, W)
-
-        ma, Sa = ms_r, Ss_r
-        self.block_Js = []
-
-        for blk in self.res_blocks:
-            # residual block (no external ReLU—each block includes its own internal relu)
-            mz, Sz = blk.forward(ma, Sa)
-            # External ReLU after the sum
-            N2, C2, H2, W2 = mz.shape
-            ma_r, Sa_r, J = triton_relu_moments(mz.reshape(-1), Sz.reshape(-1))
-            ma = ma_r.view(N2, C2, H2, W2)
-            Sa = Sa_r.view(N2, C2, H2, W2)
-            self.block_Js.append(J.view(N2, C2, H2, W2))
-
-        # Global average pool
-        self.pre_pool_shape = ma.shape
-        ma_p, Sa_p = triton_avg_pool_fwd(ma, Sa, self.pool_k)
-
-        # Flatten → FC
-        self.ma_flat = ma_p.view(N, -1)
-        self.Sa_flat = Sa_p.view(N, -1)
-        mout, Sout = self.fc.forward(self.ma_flat, self.Sa_flat)
-        return mout, Sout
-
-    def step(self, x_batch, y_batch, sigma_v):
-        y_pred_m, y_pred_S = self.forward(x_batch)
-        N = x_batch.shape[0]
-
-        # Output innovation (TAGI update signal)
-        Sy = y_pred_S + sigma_v ** 2
-        delta_m = (y_batch - y_pred_m) / Sy
-        delta_S = -1.0 / Sy
-
-        # FC backward → (N, 512)
-        delta_m, delta_S = self.fc.backward(delta_m, delta_S)
-
-        # After global avgpool(k), spatial output is 1×1.
-        # FC backward gives (N, 512); reshape to (N, 512, 1, 1) for pool backward.
-        N_pool, C_pool = delta_m.shape
-        delta_m = delta_m.view(N_pool, C_pool, 1, 1)
-        delta_S = delta_S.view(N_pool, C_pool, 1, 1)
-
-        # Pool backward: (N, C, 1, 1) → (N, C, H_in, W_in)
-        _, C, H_in, W_in = self.pre_pool_shape
-        delta_m, delta_S = triton_avg_pool_bwd(delta_m, delta_S,
-                                               N, C, H_in, W_in, self.pool_k)
-
-        # Residual blocks (reversed)
-        for blk, J in zip(reversed(self.res_blocks), reversed(self.block_Js)):
-            # External ReLU Jacobian
-            delta_m = delta_m * J
-            delta_S = delta_S * J * J
-            delta_m, delta_S = blk.backward(delta_m, delta_S)
-
-        # Stem ReLU Jacobian
-        delta_m = delta_m * self.stem_J
-        delta_S = delta_S * self.stem_J * self.stem_J
-        self.stem_conv.backward(delta_m, delta_S)
-
-
-# ====================================================================
 # PyTorch Reference CNN (for benchmarking)
 # ====================================================================
 
@@ -606,10 +432,12 @@ class PTConv2D:
         self.stride, self.padding = stride, padding
         K = C_in * kernel_size * kernel_size
 
-        self.mw = torch.randn(K, C_out, device=device) / np.sqrt(K)
-        self.Sw = torch.full((K, C_out), 1.0 / K, device=device)
+        # He initialization: scale = sqrt(1 / fan_in)
+        scale = np.sqrt(1.0 / K)
+        self.mw = torch.randn(K, C_out, device=device) * scale
+        self.Sw = torch.full((K, C_out), scale ** 2, device=device)
         self.mb = torch.zeros(1, C_out, device=device)
-        self.Sb = torch.full((1, C_out), 0.01, device=device)
+        self.Sb = torch.full((1, C_out), scale ** 2, device=device)
 
     def forward(self, ma, Sa):
         N, C, H, W = ma.shape
@@ -677,10 +505,12 @@ class PTAvgPool2D:
 
 class PTFCLayer:
     def __init__(self, inf, outf, dev):
-        self.mw = torch.randn(inf, outf, device=dev) / np.sqrt(inf)
-        self.Sw = torch.full((inf, outf), 1.0 / inf, device=dev)
+        # He initialization: scale = sqrt(1 / fan_in)
+        scale = np.sqrt(1.0 / inf)
+        self.mw = torch.randn(inf, outf, device=dev) * scale
+        self.Sw = torch.full((inf, outf), scale ** 2, device=dev)
         self.mb = torch.zeros(1, outf, device=dev)
-        self.Sb = torch.full((1, outf), 0.01, device=dev)
+        self.Sb = torch.full((1, outf), scale ** 2, device=dev)
     def forward(self, ma, Sa):
         self.ma_in = ma
         self.mz = ma @ self.mw + self.mb

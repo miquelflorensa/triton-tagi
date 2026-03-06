@@ -27,10 +27,12 @@ DEVICE = torch.device("cuda")
 
 class PTLayer:
     def __init__(self, in_f, out_f, dev):
-        self.mw = torch.randn(in_f, out_f, device=dev) / np.sqrt(in_f)
-        self.Sw = torch.full((in_f, out_f), 1.0 / in_f, device=dev)
+        # He initialization: scale = sqrt(1 / fan_in)
+        scale = np.sqrt(1.0 / in_f)
+        self.mw = torch.randn(in_f, out_f, device=dev) * scale
+        self.Sw = torch.full((in_f, out_f), scale ** 2, device=dev)
         self.mb = torch.zeros(1, out_f, device=dev)
-        self.Sb = torch.full((1, out_f), 0.01, device=dev)
+        self.Sb = torch.full((1, out_f), scale ** 2, device=dev)
 
     def forward(self, ma, Sa):
         self.ma_in = ma

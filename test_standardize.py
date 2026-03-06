@@ -17,8 +17,6 @@ from torchvision import datasets
 
 from src import Sequential
 from src.layers import Linear, ReLU, Remax, Bernoulli
-# Changed the import to use the new forward scaling function
-from src.init import forward_scale_weights, verify_standardization
 
 torch.manual_seed(42)
 np.random.seed(42)
@@ -127,18 +125,6 @@ def main():
 
     print(f"\n{net}")
     print(f"  Parameters: {net.num_parameters():,}")
-
-    # ── Standardize weights using a batch of training data ──
-    init_batch_size = 4096
-    init_batch = x_train[:init_batch_size]
-    print(f"\n  Scaling forward with batch of {init_batch_size} samples...")
-    
-    # Swapped function call and removed the iterations parameter
-    forward_scale_weights(net, init_batch, target_var=1.0, verbose=True)
-
-    # ── Verify ──
-    # Added target_var argument for consistency
-    verify_standardization(net, init_batch, target_var=1.0, verbose=True)
 
     # ── Train ──
     batch_size = 128

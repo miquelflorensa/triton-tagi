@@ -29,18 +29,19 @@ import torch
 
 from .layers.linear import Linear
 from .layers.relu import ReLU
+from .layers.leaky_relu import LeakyReLU
 from .layers.remax import Remax
 from .layers.bernoulli import Bernoulli
 from .layers.conv2d import Conv2D
 from .layers.avgpool2d import AvgPool2D
 from .layers.batchnorm2d import BatchNorm2D
-from .layers.resblock import ResBlock
+from .layers.resblock import ResBlock, Add
 from .layers.flatten import Flatten
 from .update.observation import compute_innovation
 from .update.parameters import get_cap_factor
 
 # Layers that have .forward() and .backward() but NO learnable parameters
-_ACTIVATION_LAYERS = (ReLU, Remax, Bernoulli, AvgPool2D, Flatten)
+_ACTIVATION_LAYERS = (ReLU, LeakyReLU, Remax, Bernoulli, AvgPool2D, Flatten)
 
 # Layers that have learnable parameters and .update()
 _LEARNABLE_LAYERS = (Linear, Conv2D, BatchNorm2D, ResBlock)
@@ -65,7 +66,20 @@ class Sequential:
 
         # Move learnable layers to the target device
         for layer in self.layers:
-            if hasattr(layer, 'mw'):
+            if isinstance(layer, ResBlock):
+                # ResBlock handles its own sub-layers; just set device
+                layer.device = self.device
+                for sub in layer._learnable:
+                    if hasattr(sub, 'mw'):
+                        sub.device = self.device
+                        sub.mw = sub.mw.to(self.device)
+                        sub.Sw = sub.Sw.to(self.device)
+                        sub.mb = sub.mb.to(self.device)
+                        sub.Sb = sub.Sb.to(self.device)
+                    if hasattr(sub, 'running_mean'):
+                        sub.running_mean = sub.running_mean.to(self.device)
+                        sub.running_var  = sub.running_var.to(self.device)
+            elif hasattr(layer, 'mw'):
                 layer.device = self.device
                 layer.mw = layer.mw.to(self.device)
                 layer.Sw = layer.Sw.to(self.device)
@@ -169,6 +183,9 @@ class Sequential:
         """Return total number of learnable scalars (means + variances)."""
         total = 0
         for layer in self.layers:
-            if isinstance(layer, _LEARNABLE_LAYERS):
-                total += layer.mw.numel() + layer.mb.numel()
-        return total * 2  # means + variances
+            if isinstance(layer, ResBlock):
+                # ResBlock.num_sub_parameters() already returns means+variances
+                total += layer.num_sub_parameters()
+            elif isinstance(layer, _LEARNABLE_LAYERS):
+                total += (layer.mw.numel() + layer.mb.numel()) * 2
+        return total

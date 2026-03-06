@@ -20,7 +20,6 @@ from torchvision import datasets, transforms
 
 from src import Sequential
 from src.layers import Linear, ReLU, Remax, Bernoulli
-from src.init import forward_scale_weights, verify_standardization
 
 # ── reproducibility ──
 torch.manual_seed(42)
@@ -147,19 +146,14 @@ def main():
 
     # ── Build network ──
     net = Sequential([
-        Linear(784, 512, device=DEVICE, gain_mean=2.0, gain_var=2.0),
+        Linear(784, 512, device=DEVICE, gain_w=2.0, gain_b=2.0),
         ReLU(),
-        Linear(512, 256, device=DEVICE, gain_mean=2.0, gain_var=2.0),
+        Linear(512, 256, device=DEVICE, gain_w=2.0, gain_b=2.0),
         ReLU(),
-        Linear(256, 10,  device=DEVICE, gain_mean=2.0, gain_var=2.0),
+        Linear(256, 10,  device=DEVICE, gain_w=2.0, gain_b=2.0),
         # Remax(),
         Bernoulli(n_gh=32),
     ], device=DEVICE)
-
-    forward_scale_weights(net, x_train[:4096*2], target_var=1.0, verbose=True)
-
-    # ── Verify ──
-    verify_standardization(net, x_train[:4096*2], target_var=1.0, verbose=True)
 
     print(f"\n{net}")
     print(f"  Parameters: {net.num_parameters():,}")

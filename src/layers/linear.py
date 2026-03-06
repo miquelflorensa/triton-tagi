@@ -17,10 +17,10 @@ Delta computation (matches cuTAGI):
 """
 
 import torch
-import numpy as np
 
 from ..kernels.common import triton_fused_var_forward, triton_fused_backward_delta
 from ..update.parameters import update_parameters
+from ..param_init import init_weight_bias_linear
 
 
 class Linear:
@@ -32,31 +32,26 @@ class Linear:
     in_features  : int   number of input neurons
     out_features : int   number of output neurons
     device       : str or torch.device
-    gain_mean    : float  Xavier-like scaling for mean initialisation (default 2.0)
-    gain_var     : float  initial variance scaling (default 0.1)
+    init_method  : str   "He" or "Xavier" (default "He")
+    gain_w       : float  gain multiplier for weight variance (default 1.0)
+    gain_b       : float  gain multiplier for bias variance (default 1.0)
     bias         : bool   whether to include a bias term (default True)
     """
 
     def __init__(self, in_features, out_features, device="cuda",
-                 gain_mean=1.0, gain_var=1.0, bias=True):
+                 init_method="He", gain_w=1.0, gain_b=1.0, bias=True):
         self.in_features  = in_features
         self.out_features = out_features
         self.device = torch.device(device)
 
-        # --- Weight mean & variance ---
-        std_mean = np.sqrt(gain_mean / in_features)
-        self.mw = torch.randn(in_features, out_features, device=self.device) * std_mean
-        self.Sw = torch.full((in_features, out_features),
-                             gain_var / in_features, device=self.device)
-
-        # --- Bias mean & variance ---
+        # --- cuTAGI-style initialization ---
         self.has_bias = bias
-        if bias:
-            self.mb = torch.zeros(1, out_features, device=self.device)
-            self.Sb = torch.full((1, out_features), 1e-3, device=self.device)
-        else:
-            self.mb = torch.zeros(1, out_features, device=self.device)
-            self.Sb = torch.zeros(1, out_features, device=self.device)
+        self.mw, self.Sw, self.mb, self.Sb = init_weight_bias_linear(
+            in_features, out_features,
+            init_method=init_method,
+            gain_w=gain_w, gain_b=gain_b,
+            bias=bias, device=self.device,
+        )
 
         # Saved for backward
         self.ma_in = None

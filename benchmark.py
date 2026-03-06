@@ -23,10 +23,12 @@ WARMUP_ITERS = 5       # JIT compilation warm-up
 
 class PyTorchTAGILayer:
     def __init__(self, in_f, out_f, device):
-        self.mw = torch.randn(in_f, out_f, device=device) / np.sqrt(in_f)
-        self.Sw = torch.full((in_f, out_f), 1.0 / in_f, device=device)
+        # He initialization: scale = sqrt(1 / fan_in)
+        scale = np.sqrt(1.0 / in_f)
+        self.mw = torch.randn(in_f, out_f, device=device) * scale
+        self.Sw = torch.full((in_f, out_f), scale ** 2, device=device)
         self.mb = torch.zeros(1, out_f, device=device)
-        self.Sb = torch.full((1, out_f), 0.01, device=device)
+        self.Sb = torch.full((1, out_f), scale ** 2, device=device)
 
     def forward(self, ma, Sa):
         self.ma_in, self.Sa_in = ma, Sa

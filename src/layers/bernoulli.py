@@ -156,8 +156,8 @@ def triton_bernoulli_moments(mu_z, sigma_z_sq, n_gh=32):
     )
 
     # normalise + derive variance & covariance
-    P = P / P.sum(dim=-1, keepdim=True).clamp(min=1e-30)
-    V = (P * (1.0 - P)).clamp(min=1e-12)
+    P = P / P.sum(dim=-1, keepdim=True).clamp(min=1e-7)
+    V = (P * (1.0 - P)).clamp(min=1e-7)
     C = EXf - mu_z * P
 
     if squeeze:

@@ -20,10 +20,10 @@ Backward:
 import torch
 import triton
 import triton.language as tl
-import numpy as np
 
 from ..kernels.common import triton_fused_var_forward, triton_fused_backward_delta
 from ..update.parameters import update_parameters
+from ..param_init import init_weight_bias_conv2d
 
 BLOCK_EW = 1024
 
@@ -157,10 +157,13 @@ class Conv2D:
     stride      : int  (default 1)
     padding     : int  (default 0)
     device      : str or torch.device
+    init_method : str  "He" or "Xavier" (default "He")
+    gain_w      : float  gain multiplier for weight variance (default 1.0)
+    gain_b      : float  gain multiplier for bias variance (default 1.0)
     """
 
     def __init__(self, C_in, C_out, kernel_size, stride=1, padding=0,
-                 device="cuda", gain_w=1.0, gain_b=1.0):
+                 device="cuda", init_method="He", gain_w=1.0, gain_b=1.0):
         self.C_in  = C_in
         self.C_out = C_out
         self.kH = self.kW = kernel_size
@@ -168,16 +171,13 @@ class Conv2D:
         self.padding = padding
         self.device  = torch.device(device)
 
-        K = C_in * self.kH * self.kW
-
-        # --- Weight mean & variance ---
-        std_mean = np.sqrt(gain_w / K)
-        self.mw = torch.randn(K, C_out, device=self.device) * std_mean
-        self.Sw = torch.full((K, C_out), gain_w / K, device=self.device)
-
-        # --- Bias mean & variance ---
-        self.mb = torch.zeros(1, C_out, device=self.device)
-        self.Sb = torch.full((1, C_out), gain_b * 0.01, device=self.device)
+        # --- cuTAGI-style initialization ---
+        self.mw, self.Sw, self.mb, self.Sb = init_weight_bias_conv2d(
+            kernel_size, C_in, C_out,
+            init_method=init_method,
+            gain_w=gain_w, gain_b=gain_b,
+            device=self.device,
+        )
         self.has_bias = True
 
         # Stored for backward

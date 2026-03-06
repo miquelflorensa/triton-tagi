@@ -267,12 +267,12 @@ def triton_output_innovation(y, ym, yS, sigma_v):
 class TritonTAGILayer:
     def __init__(self, in_features, out_features, device, gain_mean=2.0, gain_var=0.1):
         self.device = device
-        std_mean = np.sqrt(gain_mean / in_features)
-        self.mw = torch.randn(in_features, out_features, device=device) * std_mean
-        val_var = gain_var / in_features
-        self.Sw = torch.full((in_features, out_features), val_var, device=device)
+        # He initialization: scale = sqrt(1 / fan_in)
+        scale = np.sqrt(1.0 / in_features)
+        self.mw = torch.randn(in_features, out_features, device=device) * scale
+        self.Sw = torch.full((in_features, out_features), (gain_var * scale) ** 2, device=device)
         self.mb = torch.zeros(1, out_features, device=device)
-        self.Sb = torch.full((1, out_features), 1e-3, device=device)
+        self.Sb = torch.full((1, out_features), (gain_var * scale) ** 2, device=device)
 
     def forward(self, ma, Sa):
         self.ma_in = ma
