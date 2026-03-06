@@ -32,6 +32,7 @@ from src import Sequential
 from src.layers import (Linear, ReLU, Conv2D, Flatten, Remax,
                         BatchNorm2D, AvgPool2D, ResBlock, Bernoulli)
 from src.monitor import TAGIMonitor
+from src.init import init_residual_aware
 
 torch.manual_seed(42)
 np.random.seed(42)
@@ -553,21 +554,16 @@ def main():
     print(f"  Train: {x_train.shape[0]:,}  |  Test: {x_test.shape[0]:,}")
     print(f"  Input shape: {x_train.shape[1:]}")
 
-    # ── Build ResNet-18 with depth-scaled gains (Section 4) ──
-    # cuTAGI cifar_resnet_bench uses uniform gain_w=0.10 for ResNet-18.
-    # We use a mild parabolic profile centred on cuTAGI's value.
-    g_min = 0.10
-    g_max = 0.10
+    # ── Build ResNet-18, then apply residual-aware init ──
+    # Build with the working gain=0.10, then attenuate bn2.γ in each
+    # ResBlock so the branch contributes only η of the output variance.
+    # This prevents the variance-doubling problem (2^L → (1+η)^L).
+    eta = 0.5    # start conservative (η=0.5 → γ≈0.707)
     net = build_resnet18(
         num_classes=10, head="remax", device=DEVICE,
-        g_min=g_min, g_max=g_max,
+        g_min=0.1, g_max=0.1,
     )
-
-    print(f"\n  Depth-scaled gains (g_min={g_min}, g_max={g_max}):")
-    N_SLOTS = 11
-    for i in range(N_SLOTS):
-        g = depth_gain(i, N_SLOTS, g_min, g_max)
-        print(f"    slot {i:2d}: g={g:.4f}")
+    init_residual_aware(net, eta=eta, verbose=True)
 
     print(f"\n{net}")
     print(f"  Parameters: {net.num_parameters():,}")
@@ -615,7 +611,7 @@ def main():
     # cuTAGI cifar_resnet_bench uses constant σ_v (decay_factor=1).
     # We use mild decay starting after epoch 5 so early BN stats stabilise.
     # Slower decay (0.98) + lower floor lets learning continue longer.
-    decay_factor    = 0.98
+    decay_factor    = 0.90
     min_sigma_v     = 0.15 * sigma_v  # floor at 15% of initial
 
     print(f"\n  Batch size     : {batch_size}")

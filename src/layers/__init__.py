@@ -10,3 +10,4 @@ from .avgpool2d import AvgPool2D
 from .batchnorm2d import BatchNorm2D
 from .flatten import Flatten
 from .resblock import ResBlock, Add
+from .even_softplus import EvenSoftplus

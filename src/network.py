@@ -37,11 +37,13 @@ from .layers.avgpool2d import AvgPool2D
 from .layers.batchnorm2d import BatchNorm2D
 from .layers.resblock import ResBlock, Add
 from .layers.flatten import Flatten
+from .layers.even_softplus import EvenSoftplus
 from .update.observation import compute_innovation
 from .update.parameters import get_cap_factor
 
 # Layers that have .forward() and .backward() but NO learnable parameters
-_ACTIVATION_LAYERS = (ReLU, LeakyReLU, Remax, Bernoulli, AvgPool2D, Flatten)
+_ACTIVATION_LAYERS = (ReLU, LeakyReLU, Remax, Bernoulli, AvgPool2D, Flatten,
+                      EvenSoftplus)
 
 # Layers that have learnable parameters and .update()
 _LEARNABLE_LAYERS = (Linear, Conv2D, BatchNorm2D, ResBlock)

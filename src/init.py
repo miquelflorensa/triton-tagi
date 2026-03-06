@@ -2,11 +2,15 @@
 Network initialization utilities for TAGI.
 
 All layer-level initialization is handled by param_init.py, which each layer
-calls in its own __init__().  This module provides a single convenience
-function that re-initializes every learnable layer in a Sequential network
-using the same param_init routines (useful after architecture changes or to
-get a fresh set of parameters).
+calls in its own __init__().  This module provides:
+
+  - reinit_net()             — symmetric He re-init for all layers
+  - init_residual_aware()    — asymmetric ResBlock init (Conv2 attenuated,
+                               skip carries most variance)
 """
+
+import math
+import torch
 
 from .layers.linear import Linear
 from .layers.conv2d import Conv2D
@@ -103,3 +107,71 @@ def reinit_net(net, verbose=True):
 
     if verbose:
         print("=" * 60)
+
+    return net
+
+
+# ======================================================================
+#  Residual-aware initialization
+#
+#  Problem: with symmetric He init, each ResBlock addition doubles the
+#  variance: σ²_out = σ²_branch + σ²_skip ≈ 2.  After L blocks: σ² ≈ 2^L.
+#
+#  Fix: attenuate the LAST BatchNorm's γ (scale) in each ResBlock so the
+#  branch contributes only η fraction of the output variance.  This is
+#  the TAGI-native SkipInit — instead of γ=0 we use γ=√η to preserve
+#  Bayesian uncertainty.
+#
+#  After the second BN with γ=√η, branch output has variance ≈ η.
+#  Skip contributes ≈ 1.  Total: σ²_out ≈ 1 + η.
+#  After L blocks: σ² ≈ (1+η)^L.
+#
+#  All conv/linear weights stay at the existing (working) initialization.
+# ======================================================================
+
+def init_residual_aware(net, eta=0.1, verbose=True):
+    """
+    Residual-aware initialization for TAGI networks with ResBlocks.
+
+    Sets the second BatchNorm's γ (scale parameter) in each ResBlock to
+    √η, so the residual branch contributes only η fraction of variance
+    at each addition.  This prevents variance doubling (2^L → (1+η)^L).
+
+    All other parameters (conv weights, biases, first BN) are left at
+    their existing initialization.
+
+    Parameters
+    ----------
+    net     : Sequential   network to initialize
+    eta     : float        residual branch variance fraction (default 0.1)
+    verbose : bool         print init summary
+    """
+    gamma = math.sqrt(eta)
+
+    if verbose:
+        print("=" * 60)
+        print("  Residual-Aware Initialization (BN γ scaling)")
+        print(f"  η={eta:.4f}  →  bn2.γ = √η = {gamma:.4f}")
+        print("=" * 60)
+
+    for i, layer in enumerate(net.layers):
+        if isinstance(layer, ResBlock):
+            # Set second BN's gamma to √η (attenuate branch output)
+            layer.bn2.mw = torch.full_like(layer.bn2.mw, gamma)
+
+            if verbose:
+                proj_str = ""
+                if layer.use_projection:
+                    proj_str = f"  [projection]"
+                print(f"  Layer {i:2d} (ResBlock): "
+                      f"bn2.γ = {gamma:.4f}{proj_str}")
+
+    if verbose:
+        n_blocks = sum(1 for l in net.layers if isinstance(l, ResBlock))
+        expected_var = (1.0 + eta) ** n_blocks
+        print(f"  ──────────────────────────────────────────")
+        print(f"  Expected σ² after {n_blocks} blocks: "
+              f"(1+{eta})^{n_blocks} = {expected_var:.3f}")
+        print("=" * 60)
+
+    return net

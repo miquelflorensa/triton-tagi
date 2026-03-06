@@ -18,6 +18,8 @@ from tagi_triton import (
     triton_output_innovation,
     TritonTAGILayer,          # FC layer (for after flatten)
 )
+from src.layers.even_softplus import even_softplus
+from src.update.observation import compute_innovation
 
 # ====================================================================
 # Triton Kernels: im2col / col2im
@@ -349,6 +351,9 @@ class TritonTAGICNN:
                 self.layers.append(TritonTAGIAvgPool2D(s[1]))
             elif t == 'fc':
                 self.layers.append(TritonTAGILayer(s[1], s[2], device))
+            elif t == 'even_softplus':
+                # s[1] = half_width (K = number of observation dims)
+                self.layers.append(s[1])  # store half_width as the "layer"
             elif t in ('relu', 'flatten'):
                 self.layers.append(None)
 
@@ -357,6 +362,8 @@ class TritonTAGICNN:
         Sa = torch.zeros_like(x)
         self.relu_jacobians = []
         self.relu_indices = []
+        self.even_softplus_jacobians = []
+        self.even_softplus_indices = []
 
         for i, (lt, layer) in enumerate(zip(self.layer_types, self.layers)):
             if lt == 'conv':
@@ -378,6 +385,16 @@ class TritonTAGICNN:
                     Sa = Sa.view_as(ma)
                     self.relu_jacobians.append(J.view_as(ma))
                 self.relu_indices.append(i)
+            elif lt == 'even_softplus':
+                half_width = layer  # stored half_width
+                original_shape = ma.shape
+                ma_flat, Sa_flat, J = even_softplus(
+                    ma.reshape(-1), Sa.reshape(-1), half_width
+                )
+                ma = ma_flat.view(original_shape)
+                Sa = Sa_flat.view(original_shape)
+                self.even_softplus_jacobians.append(J.view(original_shape))
+                self.even_softplus_indices.append(i)
             elif lt == 'flatten':
                 self.flatten_shape = ma.shape
                 ma = ma.view(ma.shape[0], -1)
@@ -389,10 +406,17 @@ class TritonTAGICNN:
 
     def step(self, x_batch, y_batch, sigma_v):
         y_pred_m, y_pred_S = self.forward(x_batch)
-        delta_mz, delta_Sz = triton_output_innovation(
-            y_batch, y_pred_m, y_pred_S, sigma_v)
+
+        # Check if heteroscedastic (output is 2x the observation width)
+        if y_pred_m.shape[-1] == 2 * y_batch.shape[-1]:
+            delta_mz, delta_Sz = compute_innovation(
+                y_batch, y_pred_m, y_pred_S, sigma_v)
+        else:
+            delta_mz, delta_Sz = triton_output_innovation(
+                y_batch, y_pred_m, y_pred_S, sigma_v)
 
         relu_iter = len(self.relu_jacobians) - 1
+        esp_iter = len(self.even_softplus_jacobians) - 1
 
         for i in reversed(range(len(self.layers))):
             lt = self.layer_types[i]
@@ -408,6 +432,14 @@ class TritonTAGICNN:
                     J = J.view(delta_mz.shape)
                 delta_mz = delta_mz * J          # J for mean
                 delta_Sz = delta_Sz * J * J      # J² for variance
+
+            elif lt == 'even_softplus':
+                J = self.even_softplus_jacobians[esp_iter]
+                esp_iter -= 1
+                if J.shape != delta_mz.shape:
+                    J = J.view(delta_mz.shape)
+                delta_mz = delta_mz * J
+                delta_Sz = delta_Sz * J * J
 
             elif lt == 'flatten':
                 delta_mz = delta_mz.view(self.flatten_shape)
