@@ -23,6 +23,7 @@ from .param_init import (he_init, xavier_init, gaussian_param_init,
 from .init import reinit_net, init_residual_aware
 from .monitor import TAGIMonitor, sweep_gains, sweep_sigma_v, compare_heads
 from .auto_tune import auto_tune, find_best_gain, find_best_sigma_v
+from .optimizer import AdamTAGI
 
 __version__ = "0.1.0"
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "reinit_net", "init_residual_aware",
     "TAGIMonitor", "sweep_gains", "sweep_sigma_v", "compare_heads",
     "auto_tune", "find_best_gain", "find_best_sigma_v",
+    "AdamTAGI",
 ]

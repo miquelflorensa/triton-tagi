@@ -21,3 +21,8 @@ data/
 
 # Logs
 run_logs/
+run_logs_adam/
+run_logs_adam_resnet/
+run_logs_cifar100/
+run_logs_adam_cifar100/
+run_logs_imagenet/

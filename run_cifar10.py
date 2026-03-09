@@ -293,7 +293,7 @@ def main():
     # but we pass 1.0 just to satisfy the class signature.
     net = build_simple_3cnn(
         num_classes=10, head="remax", device=DEVICE,
-        gain_w=1.0, gain_b=1.0,
+        gain_w=0.1, gain_b=0.1,
     )
 
     print(f"\n{net}")
