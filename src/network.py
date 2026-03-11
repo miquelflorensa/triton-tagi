@@ -38,6 +38,10 @@ from .layers.batchnorm2d import BatchNorm2D
 from .layers.resblock import ResBlock, Add
 from .layers.flatten import Flatten
 from .layers.even_softplus import EvenSoftplus
+from .layers.shared_var_linear import SharedVarLinear
+from .layers.shared_var_conv2d import SharedVarConv2D
+from .layers.shared_var_batchnorm2d import SharedVarBatchNorm2D
+from .layers.shared_var_resblock import SharedVarResBlock
 from .update.observation import compute_innovation
 from .update.parameters import get_cap_factor
 
@@ -46,7 +50,9 @@ _ACTIVATION_LAYERS = (ReLU, LeakyReLU, Remax, Bernoulli, AvgPool2D, Flatten,
                       EvenSoftplus)
 
 # Layers that have learnable parameters and .update()
-_LEARNABLE_LAYERS = (Linear, Conv2D, BatchNorm2D, ResBlock)
+_LEARNABLE_LAYERS = (Linear, Conv2D, BatchNorm2D, ResBlock,
+                     SharedVarLinear, SharedVarConv2D, SharedVarBatchNorm2D,
+                     SharedVarResBlock)
 
 # All supported layers
 _ALL_LAYERS = _ACTIVATION_LAYERS + _LEARNABLE_LAYERS
@@ -68,25 +74,36 @@ class Sequential:
 
         # Move learnable layers to the target device
         for layer in self.layers:
-            if isinstance(layer, ResBlock):
+            if isinstance(layer, (ResBlock, SharedVarResBlock)):
                 # ResBlock handles its own sub-layers; just set device
                 layer.device = self.device
                 for sub in layer._learnable:
                     if hasattr(sub, 'mw'):
                         sub.device = self.device
                         sub.mw = sub.mw.to(self.device)
-                        sub.Sw = sub.Sw.to(self.device)
+                        if hasattr(sub, 'Sw') and isinstance(sub.Sw, torch.Tensor):
+                            # Only move if it's a real tensor, not a property
+                            pass
+                        if hasattr(sub, 'sw'):
+                            sub.sw = sub.sw.to(self.device)
+                            sub.sb = sub.sb.to(self.device)
+                        elif hasattr(sub, 'Sw') and not isinstance(type(sub).__dict__.get('Sw'), property):
+                            sub.Sw = sub.Sw.to(self.device)
+                            sub.Sb = sub.Sb.to(self.device)
                         sub.mb = sub.mb.to(self.device)
-                        sub.Sb = sub.Sb.to(self.device)
                     if hasattr(sub, 'running_mean'):
                         sub.running_mean = sub.running_mean.to(self.device)
                         sub.running_var  = sub.running_var.to(self.device)
             elif hasattr(layer, 'mw'):
                 layer.device = self.device
                 layer.mw = layer.mw.to(self.device)
-                layer.Sw = layer.Sw.to(self.device)
+                if hasattr(layer, 'sw'):
+                    layer.sw = layer.sw.to(self.device)
+                    layer.sb = layer.sb.to(self.device)
+                elif hasattr(layer, 'Sw') and not isinstance(type(layer).__dict__.get('Sw'), property):
+                    layer.Sw = layer.Sw.to(self.device)
+                    layer.Sb = layer.Sb.to(self.device)
                 layer.mb = layer.mb.to(self.device)
-                layer.Sb = layer.Sb.to(self.device)
             # Move BatchNorm running stats
             if hasattr(layer, 'running_mean'):
                 layer.running_mean = layer.running_mean.to(self.device)
@@ -185,7 +202,7 @@ class Sequential:
         """Return total number of learnable scalars (means + variances)."""
         total = 0
         for layer in self.layers:
-            if isinstance(layer, ResBlock):
+            if isinstance(layer, (ResBlock, SharedVarResBlock)):
                 # ResBlock.num_sub_parameters() already returns means+variances
                 total += layer.num_sub_parameters()
             elif isinstance(layer, _LEARNABLE_LAYERS):

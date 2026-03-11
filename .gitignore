@@ -19,10 +19,17 @@ data/
 # Triton cache
 .triton/
 
+.cuTAGI/
+
 # Logs
 run_logs/
 run_logs_adam/
 run_logs_adam_resnet/
 run_logs_cifar100/
 run_logs_adam_cifar100/
+run_logs_nadam_cifar100/
 run_logs_imagenet/
+run_logs_nadam/
+run_logs_shared_var/
+run_logs_shared_var_cifar100/
+

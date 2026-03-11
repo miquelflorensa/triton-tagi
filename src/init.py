@@ -16,6 +16,10 @@ from .layers.linear import Linear
 from .layers.conv2d import Conv2D
 from .layers.batchnorm2d import BatchNorm2D
 from .layers.resblock import ResBlock
+from .layers.shared_var_linear import SharedVarLinear
+from .layers.shared_var_conv2d import SharedVarConv2D
+from .layers.shared_var_batchnorm2d import SharedVarBatchNorm2D
+from .layers.shared_var_resblock import SharedVarResBlock
 from .param_init import (init_weight_bias_linear, init_weight_bias_conv2d,
                          init_weight_bias_norm)
 
@@ -155,7 +159,7 @@ def init_residual_aware(net, eta=0.1, verbose=True):
         print("=" * 60)
 
     for i, layer in enumerate(net.layers):
-        if isinstance(layer, ResBlock):
+        if isinstance(layer, (ResBlock, SharedVarResBlock)):
             # Set second BN's gamma to √η (attenuate branch output)
             layer.bn2.mw = torch.full_like(layer.bn2.mw, gamma)
 
@@ -167,7 +171,8 @@ def init_residual_aware(net, eta=0.1, verbose=True):
                       f"bn2.γ = {gamma:.4f}{proj_str}")
 
     if verbose:
-        n_blocks = sum(1 for l in net.layers if isinstance(l, ResBlock))
+        n_blocks = sum(1 for l in net.layers
+                       if isinstance(l, (ResBlock, SharedVarResBlock)))
         expected_var = (1.0 + eta) ** n_blocks
         print(f"  ──────────────────────────────────────────")
         print(f"  Expected σ² after {n_blocks} blocks: "
