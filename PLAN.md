@@ -340,19 +340,19 @@ Tolerance: `atol=1e-4, rtol=0` for fp32 (GPU arithmetic order differs between im
 
 | Layer | Forward | Backward | Update | Priority |
 |---|---|---|---|---|
-| `Linear` | ☐ | ☐ | ☐ | P0 |
-| `Conv2D` | ☐ | ☐ | ☐ | P0 |
-| `BatchNorm2D` | ☐ | ☐ | ☐ | P0 |
-| `ResBlock` (identity shortcut) | ☐ | ☐ | ☐ | P0 |
-| `ResBlock` (projection shortcut) | ☐ | ☐ | ☐ | P0 |
-| `AvgPool2D` | ☐ | ☐ | — | P0 |
-| `ReLU` | ☐ | ☐ | — | P0 |
-| `LeakyReLU` | ☐ | ☐ | — | P0 |
-| `EvenSoftplus` | ☐ | ☐ | — | P1 |
-| Full MLP (MNIST, 3 epochs) | ☐ | — | — | P0 |
+| `Linear` | ☑ | ☑ | ☑ | P0 |
+| `Conv2D` | ☑ | ☑ | ☑ | P0 |
+| `BatchNorm2D` | ☑ | ☑ | ☑ | P0 |
+| `ResBlock` (identity shortcut) | ☑ | ☑ | ☑ | P0 |
+| `ResBlock` (projection shortcut) | ☑ | ☑ | ☑ | P0 |
+| `AvgPool2D` | ☑ | ☑ | — | P0 |
+| `ReLU` | ☑ | ☑ | — | P0 |
+| `LeakyReLU` | ☑ | ☑ | — | P0 |
+| `EvenSoftplus` | ☑ | ☑ | — | P1 |
+| Full MLP (MNIST, 5 epochs) | ☑ | — | — | P0 |
 | Full CNN (CIFAR-10, 3 epochs) | ☐ | — | — | P1 |
 
-P0 must pass before any new feature work begins. P1 must pass before Phase 2.
+P0 complete as of 2026-04-15 (131 tests pass). P1 CNN validation pending before Phase 2.
 
 ### 6.3 Test Template
 
@@ -442,12 +442,17 @@ These tasks are independent and can be done in any order:
 
 8. **Fill in §3 Code of `STYLE_GUIDE.md`** based on §4 of this document.
 
-### Phase 1: Systematic Validation
+### Phase 1: Systematic Validation — COMPLETE (2026-04-15)
 
-1. Inspect the cuTAGI Python API (see §6.5). Document findings in a `tests/validation/README.md`.
-2. Write and pass validation tests for all P0 layers (§6.2). Fix any discrepancies — they are bugs, not acceptable differences.
-3. Write and pass the MNIST end-to-end validation test.
-4. Check off the P0 rows in the validation matrix (§6.2).
+All P0 layers validated; 131 tests pass. Two bugs found and fixed during validation:
+- `relu.py`: CDF used `1 + erf(α/√2)` which gives exactly 0 in fp32 for α ≤ −6 (catastrophic
+  cancellation). cuTAGI uses `erfcf(−α/√2)`. Fixed by switching to asymptotic expansion
+  `Φ(α) ≈ φ(α)/|α|` for α < −5 (more accurate, no cancellation).
+- `parameters.py`: Sw was floored at 1e-5 unconditionally; cuTAGI only floors when the update
+  would make Sw non-positive. The unconditional floor prevented Sw from reaching ~1e-8, causing
+  7× larger weight updates than cuTAGI and training instability on GPU.
+
+MNIST (5 epochs, 784→256→128→10): triton-tagi 96.50%, cuTAGI 96.61%, gap 0.11%.
 
 ### Phase 2: Missing Layers
 

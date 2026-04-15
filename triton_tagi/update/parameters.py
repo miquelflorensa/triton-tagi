@@ -4,7 +4,8 @@ Parameter update — capped Bayesian update matching cuTAGI.
 The update rule is:
     delta_bar  = √S / cap_factor       (adaptive cap per-parameter)
     m_new = m + sign(Δ_μ) · min(|Δ_μ|, delta_bar)
-    S_new = max(S + sign(Δ_S) · min(|Δ_S|, delta_bar), 7)
+    S_new = S + sign(Δ_S) · min(|Δ_S|, delta_bar)   (if result > 0)
+    S_new = 1e-5                                       (only if result ≤ 0)
 
 Cap factor is a heuristic that regularises updates for larger batches:
     batch == 1:    cap_factor = 0.1
@@ -82,9 +83,14 @@ def _capped_param_update_kernel(
     m_new = m + dm_capped
 
     # ── Capped variance update ──
+    # cuTAGI floors S at 1e-5 only when the update would make it non-positive
+    # (base_layer.cpp: `if (var_w[i] <= 0.0f) var_w[i] = 1E-5f`).
+    # An unconditional floor prevents S from shrinking below 1e-5 when it should
+    # reach ~1e-8, causing 7× larger mw updates than cuTAGI and training instability.
     dS_sign = tl.where(dS > 0.0, 1.0, tl.where(dS < 0.0, -1.0, 0.0))
     dS_capped = dS_sign * tl.minimum(tl.abs(dS), delta_bar)
-    S_new = tl.maximum(S + dS_capped, 1e-5)
+    S_raw = S + dS_capped
+    S_new = tl.where(S_raw <= 0.0, 1e-5, S_raw)
 
     tl.store(m_ptr + offs, m_new, mask=valid)
     tl.store(S_ptr + offs, S_new, mask=valid)

@@ -24,7 +24,6 @@ import numpy as np
 import pytest
 import torch
 from pytagi.nn import Conv2d as PConv2d
-from pytagi.nn import OutputUpdater
 from pytagi.nn import Sequential as PSequential
 
 from triton_tagi.layers.conv2d import Conv2D as TConv2D
@@ -159,31 +158,25 @@ def _setup_conv_backward(seed=0):
 
 
 def test_conv2d_backward_delta_ma():
-    """delta_ma (spatial) matches fp64 reference: delta_patches @ mw^T → col2im."""
+    """delta_ma matches fp64 reference: (delta_mz_flat @ mw^T) folded via F.fold."""
+    import torch.nn.functional as F
+
     tri, ma, delta_mz, delta_Sz = _setup_conv_backward()
     d_ma, _ = tri.backward(delta_mz.to(DEVICE), delta_Sz.to(DEVICE))
 
-    # fp64 reference using the cached patches from forward
-    patches = tri.patches_ma.cpu().double()
+    N, C_in, H, W = tri.input_shape
+    H_out, W_out = tri.spatial
+    K = C_in * tri.kH * tri.kW
+
+    # fp64 reference: patch-level deltas folded back with F.fold
     dmz_flat = delta_mz.permute(0, 2, 3, 1).reshape(-1, tri.C_out).double()
-    ref_patches_d_ma = dmz_flat @ tri.mw.cpu().double().T  # (NL, K)
+    dp_ma_ref = (dmz_flat @ tri.mw.cpu().double().T).float()  # (N*L, K)
 
-    # Compare total column sums (col2im is a scatter-add; verify energy is preserved)
-    tri_col_sum = d_ma.cpu().double().sum()
-    ref_col_sum = ref_patches_d_ma.sum()
-    assert abs((tri_col_sum - ref_col_sum).item()) / (abs(ref_col_sum.item()) + 1e-8) < 1e-4
+    # F.fold expects (N, K, L); L = H_out * W_out
+    dp_ma_nkl = dp_ma_ref.view(N, H_out * W_out, K).permute(0, 2, 1).contiguous()
+    d_ma_ref = F.fold(dp_ma_nkl, output_size=(H, W), kernel_size=tri.kH, padding=tri.padding)
 
-    # Also compare element-wise against fp64 on the flat patches (pre col2im)
-    dp_ma_tri = (
-        delta_mz.to(DEVICE).permute(0, 2, 3, 1).reshape(-1, tri.C_out).float()
-        @ tri.mw.float().T
-    )
-    torch.testing.assert_close(
-        dp_ma_tri.cpu(),
-        ref_patches_d_ma.float(),
-        atol=MEAN_ATOL,
-        rtol=0,
-    )
+    torch.testing.assert_close(d_ma.cpu(), d_ma_ref, atol=MEAN_ATOL, rtol=0)
 
 
 def test_conv2d_backward_delta_mw():
@@ -213,11 +206,21 @@ def test_conv2d_backward_delta_Sw():
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Level 3: Full step (forward + backward + update)
+#
+#  pytagi's Conv2d.backward() segfaults in the installed version, so the
+#  end-to-end check uses a Python fp64 reference built from the same update
+#  chain: F.unfold → forward → innovation → backward → capped update.
+#  Each component is independently validated in Levels 1 and 2; Level 3
+#  checks that the Sequential wires them together correctly.
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def test_conv2d_update_mw():
-    """After one training step, updated mw matches cuTAGI."""
+    """After one step, updated mw matches the TAGI update formula (fp64 reference)."""
+    import torch.nn.functional as F
+
+    from triton_tagi.update.parameters import get_cap_factor
+
     torch.manual_seed(0)
     N, C_in, H, W, C_out, k = 4, 3, 8, 8, 8, 3
     sigma_v = 0.1
@@ -230,21 +233,30 @@ def test_conv2d_update_mw():
     net_tri = TSequential([tri], device=DEVICE)
     net_tri.step(ma.to(DEVICE), y.to(DEVICE), sigma_v)
 
-    # pytagi step
-    cut = _make_pytagi_conv(C_in, C_out, k, 1, H, W, mw, Sw, mb, Sb)
-    updater = OutputUpdater(cut.device)
-    cut(ma.numpy().flatten().astype(np.float32))
-    var_y = np.full(N * C_out * H * W, sigma_v**2, dtype=np.float32)
-    updater.update(
-        output_states=cut.output_z_buffer,
-        mu_obs=y.numpy().flatten().astype(np.float32),
-        var_obs=var_y,
-        delta_states=cut.input_delta_z_buffer,
-    )
-    cut.backward()
-    cut.step()
+    # fp64 reference using F.unfold (independent of triton im2col)
+    # Sequential passes Sa = zeros_like(x), so cross-term Sa@(mw²+Sw) vanishes.
+    K = C_in * k * k
+    patches = F.unfold(ma, kernel_size=k, padding=1)  # (N, K, L)
+    L = patches.shape[2]
+    patches = patches.permute(0, 2, 1).reshape(N * L, K).double()  # (N*L, K)
 
-    key = list(cut.state_dict().keys())[0]
-    mw_cut, _, _, _ = _pytagi_conv_weights(cut, key)
+    mw64, Sw64 = mw.double(), Sw.double()
+    mb64, Sb64 = mb.double(), Sb.double()
 
-    torch.testing.assert_close(tri.mw.cpu(), mw_cut, atol=UPDATE_ATOL, rtol=0)
+    mz_flat = patches @ mw64 + mb64               # (N*L, C_out)
+    Sz_flat = patches ** 2 @ Sw64 + Sb64          # Sa=0 → only patch² @ Sw + Sb
+
+    mz = mz_flat.view(N, H, W, C_out).permute(0, 3, 1, 2)
+    Sz = Sz_flat.view(N, H, W, C_out).permute(0, 3, 1, 2)
+
+    dmz = (y.double() - mz) / (Sz + sigma_v ** 2)
+    dmz_flat = dmz.permute(0, 2, 3, 1).reshape(N * L, C_out)
+
+    delta_mw = Sw64 * (patches.T @ dmz_flat)
+
+    cap = get_cap_factor(N)
+    delta_bar = Sw64.sqrt() / cap
+    dmw_capped = torch.sign(delta_mw) * torch.minimum(delta_mw.abs(), delta_bar)
+    mw_ref = (mw64 + dmw_capped).float()
+
+    torch.testing.assert_close(tri.mw.cpu(), mw_ref, atol=UPDATE_ATOL, rtol=0)

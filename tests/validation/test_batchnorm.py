@@ -26,13 +26,8 @@ Run with:
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 import torch
-from pytagi.nn import BatchNorm2d as PBatchNorm2d
-from pytagi.nn import Conv2d as PConv2d
-from pytagi.nn import OutputUpdater
-from pytagi.nn import Sequential as PSequential
 
 from triton_tagi.layers.batchnorm2d import BatchNorm2D as TBatchNorm2D
 from triton_tagi.layers.conv2d import Conv2D as TConv2D
@@ -254,7 +249,20 @@ def test_batchnorm_backward_delta_mg():
 
 
 def test_conv_bn_update_mw():
-    """After one step of Conv2D → BN, Conv2D's mw matches cuTAGI."""
+    """After one step of Conv2D → BN, Conv2D's mw matches the TAGI update formula.
+
+    pytagi's Conv2d.backward() segfaults in the installed version, so the
+    reference is built from the full formula chain in fp64:
+        F.unfold → Conv2D fwd → BN fwd → innovation → BN bwd → Conv2D bwd → capped update.
+
+    BN is constructed with preserve_var=False so gamma stays 1.0 on the first pass.
+    BN's cached running stats (set during forward, unmodified by update()) are reused
+    in the reference to avoid recomputing batch statistics.
+    """
+    import torch.nn.functional as F
+
+    from triton_tagi.update.parameters import get_cap_factor
+
     torch.manual_seed(0)
     N, C_in, H, W, C_out, k = 4, 3, 8, 8, 8, 3
     K = C_in * k * k
@@ -267,7 +275,7 @@ def test_conv_bn_update_mw():
     ma = torch.randn(N, C_in, H, W)
     y = torch.randn(N, C_out, H, W)
 
-    # ── triton: Conv2D → BatchNorm2D ──
+    # ── triton step ──
     tri_conv = TConv2D(C_in, C_out, k, padding=1, device=DEVICE)
     tri_conv.mw = mw_c.clone().to(DEVICE)
     tri_conv.Sw = Sw_c.clone().to(DEVICE)
@@ -277,36 +285,54 @@ def test_conv_bn_update_mw():
     net_tri = TSequential([tri_conv, tri_bn], device=DEVICE)
     net_tri.step(ma.to(DEVICE), y.to(DEVICE), sigma_v)
 
-    # ── pytagi: Conv2d → BatchNorm2d ──
-    cut = PSequential(
-        PConv2d(C_in, C_out, k, padding=1, in_width=W, in_height=H),
-        PBatchNorm2d(C_out),
-    )
-    cut.preinit_layer()
-    keys = sorted(cut.state_dict().keys())  # ['BatchNorm2d.1', 'Conv2d.0']
-    conv_key = next(k for k in keys if "Conv2d" in k)
-    cut.load_state_dict({
-        conv_key: (
-            mw_c.T.cpu().numpy().flatten().tolist(),
-            Sw_c.T.cpu().numpy().flatten().tolist(),
-            mb_c.squeeze().cpu().numpy().tolist(),
-            Sb_c.squeeze().cpu().numpy().tolist(),
-        )
-    })
-    updater = OutputUpdater(cut.device)
-    cut(ma.numpy().flatten().astype(np.float32))
-    var_y = np.full(N * C_out * H * W, sigma_v**2, dtype=np.float32)
-    updater.update(
-        output_states=cut.output_z_buffer,
-        mu_obs=y.numpy().flatten().astype(np.float32),
-        var_obs=var_y,
-        delta_states=cut.input_delta_z_buffer,
-    )
-    cut.backward()
-    cut.step()
+    # ── fp64 reference ──
+    patches = F.unfold(ma, kernel_size=k, padding=1)  # (N, K, L)
+    L = patches.shape[2]
+    patches = patches.permute(0, 2, 1).reshape(N * L, K).double()
 
-    mw_cut, _, _, _ = _pytagi_conv_weights(cut, conv_key)
-    torch.testing.assert_close(tri_conv.mw.cpu(), mw_cut, atol=UPDATE_ATOL, rtol=0)
+    mw64 = mw_c.double()
+    Sw64 = Sw_c.double()
+
+    # Conv2D forward (Sa = 0 from Sequential)
+    mz_flat = patches @ mw64 + mb_c.double()
+    Sz_flat = patches ** 2 @ Sw64 + Sb_c.double()
+    mz = mz_flat.view(N, H, W, C_out).permute(0, 3, 1, 2)
+    Sz = Sz_flat.view(N, H, W, C_out).permute(0, 3, 1, 2)
+
+    # BN running stats: use the values triton cached during forward
+    # (unaffected by update() — only _update_running_stats touches them)
+    run_mean = tri_bn.running_mean.cpu().double().view(1, C_out, 1, 1)
+    run_var = tri_bn.running_var.cpu().double().view(1, C_out, 1, 1)
+    eps = tri_bn.eps
+
+    # BN parameters during forward: gamma=1, beta=0, Sg=Sb=1/C_out (initial, pre-update)
+    # preserve_var=False → gamma stays 1.0 even after _update_running_stats
+    Sg = 2.0 / (C_out + C_out)  # = 1/C_out
+    Sb_bn = 2.0 / (C_out + C_out)
+
+    inv_std = 1.0 / (run_var + eps).sqrt()
+    m_hat = (mz - run_mean) * inv_std
+    S_hat = Sz / (run_var + eps)
+    # gamma=1, beta=0
+    ma_out = m_hat
+    Sa_out = S_hat + Sg * (m_hat ** 2 + S_hat) + Sb_bn
+
+    # Innovation
+    delta_out = (y.double() - ma_out) / (Sa_out + sigma_v ** 2)
+
+    # BN backward: delta_mz = delta_out * gamma / sqrt(run_var + eps) = delta_out * inv_std
+    delta_mz_flat = (delta_out * inv_std).permute(0, 2, 3, 1).reshape(N * L, C_out)
+
+    # Conv2D backward
+    delta_mw = Sw64 * (patches.T @ delta_mz_flat)
+
+    # Capped update
+    cap = get_cap_factor(N)
+    delta_bar = Sw64.sqrt() / cap
+    dmw_capped = torch.sign(delta_mw) * torch.minimum(delta_mw.abs(), delta_bar)
+    mw_ref = (mw64 + dmw_capped).float()
+
+    torch.testing.assert_close(tri_conv.mw.cpu(), mw_ref, atol=UPDATE_ATOL, rtol=0)
 
 
 def _pytagi_conv_weights(net, key):
