@@ -268,12 +268,14 @@ class ResBlock(LearnableLayer):
         self.training = True
 
         # ── Main path: Conv→ReLU→BN→Conv→ReLU→BN ──
+        # stride>1 blocks use padding_type=2 (right-bottom only) matching cuTAGI.
         self.conv1 = Conv2D(
             in_channels,
             out_channels,
             kernel_size=3,
             stride=stride,
             padding=1,
+            padding_type=2 if stride > 1 else 1,
             device=device,
             gain_w=gain_w,
             gain_b=gain_b,

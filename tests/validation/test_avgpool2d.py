@@ -4,17 +4,17 @@ pytagi's AvgPool2d crashes with a FPE when run standalone (it needs a preceding
 Conv2d to infer spatial dimensions), so the reference is a pure fp64 Python
 implementation of the same formulas.
 
-Forward formula (non-overlapping k×k pooling, stride = k):
+These tests use the default `spatial_correlation=False` branch (variance
+scales by 1/k⁴, independent-samples formula — cuTAGI-matching).  The opt-in
+`spatial_correlation=True` branch uses 1/k² and is not tested here.
+
+Forward formula (non-overlapping k×k pooling, stride = k, cuTAGI-matching):
     μ_out[n,c,oh,ow] = (1/k²) Σ_{kh,kw} μ_in[n,c,oh·k+kh, ow·k+kw]
-    S_out[n,c,oh,ow] = (1/k²) Σ_{kh,kw} S_in[n,c,oh·k+kh, ow·k+kw]
+    S_out[n,c,oh,ow] = (1/k⁴) Σ_{kh,kw} S_in[n,c,oh·k+kh, ow·k+kw]
 
-    (variance uses the same 1/k² factor as mean — cuTAGI/triton-tagi convention
-     for high spatial correlation; this is NOT the independent-samples formula
-     1/k⁴).
-
-Backward formula (chain rule through the 1/k² mean):
+Backward formula:
     δ_μ_in[n,c,h,w] = δ_μ_out[n,c,h//k, w//k] / k²
-    δ_S_in[n,c,h,w] = δ_S_out[n,c,h//k, w//k] / k²
+    δ_S_in[n,c,h,w] = δ_S_out[n,c,h//k, w//k] / k⁴
 
 Run with:
     pytest tests/validation/test_avgpool2d.py -v
@@ -39,10 +39,15 @@ pytestmark = pytest.mark.cuda
 
 
 def _avgpool_forward_ref(ma: torch.Tensor, Sa: torch.Tensor, k: int):
-    """AvgPool2D forward in fp64: mean of k×k blocks for both moments."""
+    """AvgPool2D forward in fp64.
+
+    Mean: average of k×k block (divide sum by k²).
+    Variance: sum divided by k⁴ — matches cuTAGI pooling_layer.cpp line
+    ``var_z[col] = sum_var_z / (ki2 * ki2)``.
+    """
     N, C, H, W = ma.shape
     H_out, W_out = H // k, W // k
-    # Reshape to expose the k×k tile dimensions, then average
+    k2 = k * k
     ma_out = (
         ma.double()
         .reshape(N, C, H_out, k, W_out, k)
@@ -51,25 +56,30 @@ def _avgpool_forward_ref(ma: torch.Tensor, Sa: torch.Tensor, k: int):
     Sa_out = (
         Sa.double()
         .reshape(N, C, H_out, k, W_out, k)
-        .mean(dim=(3, 5))
+        .sum(dim=(3, 5))
+        / (k2 * k2)                  # cuTAGI: sum / k⁴
     )
     return ma_out.float(), Sa_out.float()
 
 
 def _avgpool_backward_ref(delta_ma: torch.Tensor, delta_Sa: torch.Tensor, k: int):
-    """AvgPool2D backward in fp64: distribute delta equally to all k×k inputs."""
-    # Nearest-neighbour upsample by k, then scale by 1/k²
+    """AvgPool2D backward in fp64.
+
+    Mean delta: distribute equally, scale by 1/k².
+    Variance delta: distribute equally, scale by 1/k⁴ (J² = (1/k²)² backward).
+    """
+    k2 = k * k
     d_ma = (
         delta_ma.double()
         .repeat_interleave(k, dim=2)
         .repeat_interleave(k, dim=3)
-        / (k * k)
+        / k2
     )
     d_Sa = (
         delta_Sa.double()
         .repeat_interleave(k, dim=2)
         .repeat_interleave(k, dim=3)
-        / (k * k)
+        / (k2 * k2)                  # cuTAGI: delta_var / k⁴
     )
     return d_ma.float(), d_Sa.float()
 
@@ -145,7 +155,7 @@ def test_avgpool2d_backward_delta_ma():
 
 
 def test_avgpool2d_backward_delta_Sa():
-    """AvgPool2D backward δ_S_in = δ_S_out / k² broadcast, matches fp64."""
+    """AvgPool2D backward δ_S_in = δ_S_out / k⁴ broadcast, matches cuTAGI."""
     torch.manual_seed(1)
     N, C, H, W, k = 4, 8, 16, 16, 2
     ma = torch.randn(N, C, H, W, device=DEVICE)

@@ -285,6 +285,7 @@ class BatchNorm2D(LearnableLayer):
         self.m_hat = None
         self.S_hat = None
         self.input_shape = None
+        self._norm_var = None  # variance used for normalization (batch or running)
 
         # --- Parameter deltas ---
         self.delta_mw = None
@@ -303,74 +304,52 @@ class BatchNorm2D(LearnableLayer):
         """Set the layer to evaluation mode (use running stats only)."""
         self.training = False
 
-    def _update_running_stats(self, mz, Sz):
+    def _compute_batch_stats(self, mz, Sz):
         """
-        Update running mean/var with exponential moving average.
+        Compute per-channel batch mean and variance from Gaussian inputs.
 
-        Parameters
-        ----------
-        mz : Tensor (N, C, H, W)  activation means
-        Sz : Tensor (N, C, H, W)  activation variances
+        batch_mean[c] = E_{n,h,w}[μ_z]                                 (divided by n)
+        batch_var[c]  = (Σ (μ_z - batch_mean)² + Σ S_z) / (n − 1)      (Bessel-corrected)
+
+        The variance uses the Bessel-corrected (n − 1) denominator to match
+        cuTAGI's ``batchnorm2d_sample_var``. This matters for parity with
+        cuTAGI under identical init + identical batches, since any per-step
+        discrepancy in running statistics compounds across training.
+
+        Returns batch_mean (C,), batch_var (C,).
         """
         N, C, H, W = mz.shape
         HW = H * W
-        inv_count = 1.0 / (N * HW)
+        n = N * HW
+        inv_count = 1.0 / n
+
+        BLOCK_RED = min(1024, triton.next_power_of_2(n))
 
         batch_mean = torch.empty(C, device=mz.device, dtype=mz.dtype)
-        batch_var = torch.empty(C, device=mz.device, dtype=mz.dtype)
-
-        BLOCK_RED = min(1024, triton.next_power_of_2(N * HW))
-
-        _channel_mean_kernel[(C,)](
-            mz.contiguous(),
-            batch_mean,
-            N,
-            C,
-            HW,
-            inv_count,
-            BLOCK=BLOCK_RED,
-        )
-        _channel_mean_kernel[(C,)](
-            Sz.contiguous(),
-            batch_var,
-            N,
-            C,
-            HW,
-            inv_count,
-            BLOCK=BLOCK_RED,
-        )
-
-        # Also add the variance of the means to get total variance
-        # Var(z) = E[S_z] + Var(μ_z)
-        # Compute Var(μ_z) = E[μ_z²] - E[μ_z]²
-        mz_sq = mz * mz
+        batch_var_s = torch.empty(C, device=mz.device, dtype=mz.dtype)
         batch_mean_sq = torch.empty(C, device=mz.device, dtype=mz.dtype)
-        _channel_mean_kernel[(C,)](
-            mz_sq.contiguous(),
-            batch_mean_sq,
-            N,
-            C,
-            HW,
-            inv_count,
-            BLOCK=BLOCK_RED,
-        )
-        batch_var = batch_var + (batch_mean_sq - batch_mean * batch_mean)
 
-        # --- THE FIX: Bypass EMA on Step 0 ---
+        _channel_mean_kernel[(C,)](mz.contiguous(), batch_mean, N, C, HW, inv_count, BLOCK=BLOCK_RED)
+        _channel_mean_kernel[(C,)](Sz.contiguous(), batch_var_s, N, C, HW, inv_count, BLOCK=BLOCK_RED)
+        _channel_mean_kernel[(C,)]((mz * mz).contiguous(), batch_mean_sq, N, C, HW, inv_count, BLOCK=BLOCK_RED)
+
+        # Current accumulators divide by n; rescale to (n − 1) for Bessel.
+        bessel = n / (n - 1)
+        batch_var = (batch_var_s + batch_mean_sq - batch_mean * batch_mean) * bessel
+        return batch_mean, batch_var
+
+    def _update_running_stats(self, batch_mean, batch_var):
+        """
+        Update running mean/var with EMA.  First call initialises directly.
+        Also applies preserve_var gamma init on the first call.
+        """
         if not self._is_initialized:
-            # Force running stats to perfectly match the first batch
             self.running_mean = batch_mean.clone()
             self.running_var = batch_var.clone()
-
             if self.preserve_var:
-                # Stem / standalone BN: set gamma to preserve incoming variance
-                # μ_γ = √(σ²_batch + ε)  cancels the normalisation denominator
                 self.mw = torch.sqrt(self.running_var + self.eps).clone()
-            # else: keep μ_γ = 1.0 (ResBlock BN — normalise to unit variance)
-
             self._is_initialized = True
         else:
-            # EMA update for all subsequent batches
             alpha = self.momentum
             self.running_mean = (1 - alpha) * self.running_mean + alpha * batch_mean
             self.running_var = (1 - alpha) * self.running_var + alpha * batch_var
@@ -380,6 +359,16 @@ class BatchNorm2D(LearnableLayer):
     # ------------------------------------------------------------------
     def forward(self, mz: Tensor, Sz: Tensor) -> tuple[Tensor, Tensor]:
         """
+        Normalise and apply the learnable affine transform (γ, β).
+
+        Normalise per channel using running statistics:
+            μ_hat = (μ_z − μ_run) / √(S_run + ε)
+            S_hat = S_z / (S_run + ε)
+
+        Affine with Gaussian γ ~ N(μ_γ, S_γ), β ~ N(μ_β, S_β):
+            μ_out = μ_γ · μ_hat + μ_β
+            S_out = μ_γ² · S_hat  +  S_γ · (μ_hat² + S_hat)  +  S_β
+
         Parameters
         ----------
         mz : Tensor (N, C, H, W)  pre-activation means
@@ -394,9 +383,17 @@ class BatchNorm2D(LearnableLayer):
         N, C, H, W = mz.shape
         HW = H * W
 
-        # Update running stats during training
+        # During training: normalize with current batch stats (matching cuTAGI).
+        # During eval: normalize with accumulated running stats.
         if self.training:
-            self._update_running_stats(mz, Sz)
+            batch_mean, batch_var = self._compute_batch_stats(mz, Sz)
+            self._update_running_stats(batch_mean, batch_var)
+            norm_mean = batch_mean
+            norm_var = batch_var
+        else:
+            norm_mean = self.running_mean
+            norm_var = self.running_var
+        self._norm_var = norm_var
 
         # Allocate outputs + cache
         ma = torch.empty_like(mz)
@@ -410,8 +407,8 @@ class BatchNorm2D(LearnableLayer):
         _batchnorm_fwd_kernel[grid](
             mz.contiguous(),
             Sz.contiguous(),
-            self.running_mean,
-            self.running_var,
+            norm_mean,
+            norm_var,
             self.mw,
             self.Sw,
             self.mb,
@@ -438,7 +435,19 @@ class BatchNorm2D(LearnableLayer):
     # ------------------------------------------------------------------
     def backward(self, delta_ma: Tensor, delta_Sa: Tensor) -> tuple[Tensor, Tensor]:
         """
-        Compute parameter deltas and propagate to the previous layer.
+        Compute parameter deltas and back-propagate innovation deltas.
+
+        Through the affine (Jacobian = μ_γ per channel):
+            δμ_hat = μ_γ · δμ_out
+            δS_hat = μ_γ² · δS_out
+
+        Un-normalise to input space:
+            δμ_z = δμ_hat / √(S_run + ε)
+            δS_z = δS_hat / (S_run + ε)
+
+        Parameter deltas (cuTAGI convention):
+            Δμ_γ = S_γ · Σ(δμ_out · μ_hat)    Δμ_β = S_β · Σ δμ_out
+            ΔS_γ = S_γ² · Σ(δS_out · μ_hat²)  ΔS_β = S_β² · Σ δS_out
 
         Parameters
         ----------
@@ -490,7 +499,7 @@ class BatchNorm2D(LearnableLayer):
             delta_Sa.contiguous(),
             self.m_hat,
             self.S_hat,
-            self.running_var,
+            self._norm_var,
             self.mw,
             delta_mz,
             delta_Sz,

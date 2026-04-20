@@ -82,6 +82,11 @@ class Linear(LearnableLayer):
     # ------------------------------------------------------------------
     def forward(self, ma: Tensor, Sa: Tensor) -> tuple[Tensor, Tensor]:
         """
+        Propagate Gaussian moments through z = a W + b.
+
+        μ_z = μ_a @ μ_w + μ_b
+        S_z = μ_a² @ S_w  +  S_a @ (μ_w² + S_w)  +  S_b
+
         Parameters
         ----------
         ma : Tensor (B, in_features)   input activation means
@@ -102,10 +107,18 @@ class Linear(LearnableLayer):
     # ------------------------------------------------------------------
     def backward(self, delta_mz: Tensor, delta_Sz: Tensor) -> tuple[Tensor, Tensor]:
         """
-        Compute parameter deltas and propagate to the previous layer.
+        Compute parameter deltas and back-propagate innovation deltas.
 
-        The deltas are stored on the layer (self.delta_mw, etc.) but
-        NOT applied.  Call update() to apply them with capping.
+        Parameter deltas (cuTAGI convention):
+            Δμ_w = S_w · (μ_a^T @ δμ_z)       Δμ_b = S_b · Σ δμ_z
+            ΔS_w = S_w² · (μ_a²)^T @ δS_z)    ΔS_b = S_b² · Σ δS_z
+
+        Propagated deltas:
+            δμ_a = δμ_z @ μ_w^T
+            δS_a = δS_z @ (μ_w²)^T
+
+        Deltas are stored on the layer (self.delta_mw, etc.) but NOT applied.
+        Call update() to apply them with capping.
 
         Parameters
         ----------
@@ -118,11 +131,8 @@ class Linear(LearnableLayer):
         delta_Sa : Tensor (B, in_features)   variance delta to propagate
         """
         # ── Raw gradients (sum over batch) ──
-        # Mean gradient:  ma^T @ delta_mz    → (K, N)
         grad_mw = torch.matmul(self.ma_in.T, delta_mz)
         grad_mb = delta_mz.sum(0, keepdim=True)
-
-        # Variance gradient: (ma²)^T @ delta_Sz  → (K, N)
         grad_Sw = torch.matmul((self.ma_in**2).T, delta_Sz)
         grad_Sb = delta_Sz.sum(0, keepdim=True)
 

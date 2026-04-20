@@ -14,9 +14,46 @@ Tests:
 
 import torch
 
+from triton_tagi import (
+    AvgPool2D,
+    BatchNorm2D,
+    Conv2D,
+    Flatten,
+    Linear,
+    ReLU,
+    Remax,
+    ResBlock,
+    Sequential,
+)
+
 torch.manual_seed(42)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _build_resnet18(num_classes: int = 10, device: str = DEVICE) -> Sequential:
+    """Minimal ResNet-18 builder used only by tests in this module."""
+    kw = {"device": device}
+    return Sequential(
+        [
+            Conv2D(3, 64, 3, stride=1, padding=1, **kw),
+            ReLU(),
+            BatchNorm2D(64, **kw),
+            ResBlock(64, 64, stride=1, **kw),
+            ResBlock(64, 64, stride=1, **kw),
+            ResBlock(64, 128, stride=2, **kw),
+            ResBlock(128, 128, stride=1, **kw),
+            ResBlock(128, 256, stride=2, **kw),
+            ResBlock(256, 256, stride=1, **kw),
+            ResBlock(256, 512, stride=2, **kw),
+            ResBlock(512, 512, stride=1, **kw),
+            AvgPool2D(4),
+            Flatten(),
+            Linear(512, num_classes, **kw),
+            Remax(),
+        ],
+        device=device,
+    )
 
 
 def test_import():
@@ -185,9 +222,7 @@ def test_no_post_activation():
 
 def test_full_resnet18():
     """Build and run the full ResNet-18."""
-    from run_resnet18 import build_resnet18
-
-    net = build_resnet18(num_classes=10, head="remax", device=DEVICE)
+    net = _build_resnet18(num_classes=10, device=DEVICE)
 
     print(f"  Network: {net}")
     print(f"  Parameters: {net.num_parameters():,}")
@@ -212,9 +247,7 @@ def test_full_resnet18():
 
 def test_full_step():
     """Test a full training step (forward+backward+update)."""
-    from run_resnet18 import build_resnet18
-
-    net = build_resnet18(num_classes=10, head="remax", device=DEVICE)
+    net = _build_resnet18(num_classes=10, device=DEVICE)
 
     x = torch.randn(4, 3, 32, 32, device=DEVICE)
     y = torch.zeros(4, 10, device=DEVICE)

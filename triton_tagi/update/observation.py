@@ -161,3 +161,64 @@ def compute_innovation(y, y_pred_mu, y_pred_var, sigma_v):
         )
 
     return delta_mu, delta_var
+
+
+# ======================================================================
+#  Sparse (hierarchical softmax) output innovation
+# ======================================================================
+
+
+def compute_innovation_with_indices(
+    ma: "torch.Tensor",
+    Sa: "torch.Tensor",
+    y_obs: "torch.Tensor",
+    var_obs: "torch.Tensor",
+    selected_idx: "torch.Tensor",
+) -> "tuple[torch.Tensor, torch.Tensor]":
+    """Sparse output innovation for hierarchical softmax classification.
+
+    For each sample b and encoded bit c, updates only the selected tree node::
+
+        node = selected_idx[b, c] - 1          (0-indexed)
+        denom = Sa[b, node] + var_obs[b, c]
+        delta_mu[b, node] = (y_obs[b, c] - ma[b, node]) / denom
+        delta_Sa[b, node] = -1 / denom
+
+    All other positions in delta_mu and delta_Sa are zero.
+
+    Replicates cuTAGI's ``compute_selected_delta_z_output()`` from
+    ``src/base_output_updater.cpp``.
+
+    Args:
+        ma:           Output means, shape (B, n_total_nodes).
+        Sa:           Output variances, shape (B, n_total_nodes).
+        y_obs:        Encoded ±1 observations, shape (B, n_obs).
+        var_obs:      Observation variance, shape (B, n_obs).
+        selected_idx: 1-indexed node positions, shape (B, n_obs).
+
+    Returns:
+        delta_mu: Mean innovations, shape (B, n_total_nodes), sparse.
+        delta_Sa: Variance innovations, shape (B, n_total_nodes), sparse.
+    """
+    delta_mu = torch.zeros_like(ma)
+    delta_Sa = torch.zeros_like(Sa)
+
+    # Convert 1-indexed to 0-indexed: (B, n_obs)
+    node_idx = selected_idx.long() - 1
+
+    # Gather predicted mean and variance at selected nodes
+    ma_sel = torch.gather(ma, 1, node_idx)  # (B, n_obs)
+    Sa_sel = torch.gather(Sa, 1, node_idx)  # (B, n_obs)
+
+    # Innovation formula (same as dense case, evaluated at selected nodes only)
+    denom = Sa_sel + var_obs
+    dm = (y_obs - ma_sel) / denom
+    dS = -1.0 / denom
+
+    # Scatter innovations back into the full output buffers.
+    # Each class uses distinct tree nodes at every depth level, so no
+    # within-sample index collision occurs for valid HRC trees.
+    delta_mu.scatter_add_(1, node_idx, dm)
+    delta_Sa.scatter_add_(1, node_idx, dS)
+
+    return delta_mu, delta_Sa

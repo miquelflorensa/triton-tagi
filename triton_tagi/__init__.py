@@ -1,61 +1,58 @@
 """
-TAGI-Triton: Tractable Approximate Gaussian Inference on Triton
+triton-tagi: Tractable Approximate Gaussian Inference on Triton
 ================================================================
 
-A modular, GPU-accelerated library for Bayesian neural networks using TAGI.
-All heavy operations are implemented as fused Triton kernels for maximum performance.
+A minimal, GPU-accelerated Python reimplementation of cuTAGI
+(https://github.com/lhnguyen102/cuTAGI) using fused Triton kernels.
+
+The surface is deliberately small: the layer set mirrors what is needed to
+reproduce cuTAGI's headline examples (regression, MNIST MLP/CNN, CIFAR-10 CNN
+and ResNet-18) with numerical parity. Additional layers, optimizers, and
+diagnostics live under ``_archive/`` at the repository root.
 
 Modules
 -------
-- ``layers``  : Bayesian layers (Linear, ReLU, Remax, Bernoulli, Conv2D, ...)
-- ``update``  : Observation and parameter update rules
-- ``network`` : Network builder (Sequential API)
-- ``kernels`` : Low-level Triton kernels
+- ``layers``  : Bayesian layers
+- ``update``  : observation innovation and parameter update rules
+- ``network`` : ``Sequential`` network builder
+- ``kernels`` : low-level Triton kernels
 
 Numerical precision
 -------------------
-TF32 (tensor float 32) is disabled for CUDA matrix multiplications at import
-time.  cuTAGI uses scalar FMA loops (``__fmaf_rn``) which give near-fp64
-accuracy; leaving TF32 enabled in PyTorch/Triton would introduce systematic
-~1e-3 errors in the variance forward pass, breaking numerical parity.
+TF32 matmul is disabled at import time. cuTAGI uses scalar FMA loops
+(``__fmaf_rn``) with near-fp64 accuracy; leaving TF32 enabled in
+PyTorch/Triton would introduce systematic ~1e-3 errors in the variance
+forward pass and break numerical parity.
 """
 
 import torch
 
-# Disable TF32 globally so cuBLAS matmuls match cuTAGI's scalar FMA precision.
-# TF32 truncates the fp32 mantissa to 10 bits during tensor-core accumulation,
-# causing ~1e-3 systematic errors in Sz that cascade through deep networks.
 torch.backends.cuda.matmul.allow_tf32 = False
 
-from .auto_tune import auto_tune, find_best_gain, find_best_sigma_v
 from .base import Layer, LearnableLayer
-from .inference_init import inference_init
-from .init import init_residual_aware, reinit_net
+from .checkpoint import RunDir, load_model
+from .hrc_softmax import (
+    HierarchicalSoftmax,
+    class_to_obs,
+    get_predicted_labels,
+    labels_to_hrc,
+    obs_to_class_probs,
+)
 from .layers import (
-    FRN2D,
-    TLU,
     Add,
     AvgPool2D,
     BatchNorm2D,
-    Bernoulli,
     Conv2D,
     EvenSoftplus,
     Flatten,
-    FRNResBlock,
+    LayerNorm,
     Linear,
+    MaxPool2D,
     ReLU,
     Remax,
     ResBlock,
-    SharedVarBatchNorm2D,
-    SharedVarConv2D,
-    SharedVarLinear,
-    SharedVarResBlock,
 )
-from .momentum import StateSpaceMomentum
-from .monitor import TAGIMonitor, compare_heads, sweep_gains, sweep_sigma_v
-from .nadam_optimizer import NadamTAGI
 from .network import Sequential
-from .optimizer import AdamTAGI
 from .param_init import (
     gaussian_param_init,
     he_init,
@@ -65,50 +62,40 @@ from .param_init import (
     xavier_init,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     # ABCs
     "Layer",
     "LearnableLayer",
-    # Layers
+    # Network
     "Sequential",
-    "Linear",
-    "ReLU",
-    "Remax",
-    "Bernoulli",
-    "Conv2D",
+    # Layers
+    "Add",
     "AvgPool2D",
     "BatchNorm2D",
-    "Flatten",
-    "ResBlock",
-    "Add",
+    "Conv2D",
     "EvenSoftplus",
-    "FRN2D",
-    "TLU",
-    "FRNResBlock",
-    "SharedVarLinear",
-    "SharedVarConv2D",
-    "SharedVarBatchNorm2D",
-    "SharedVarResBlock",
-    # Init
+    "Flatten",
+    "LayerNorm",
+    "Linear",
+    "MaxPool2D",
+    "ReLU",
+    "Remax",
+    "ResBlock",
+    # Parameter initialisation
     "he_init",
     "xavier_init",
     "gaussian_param_init",
     "init_weight_bias_linear",
     "init_weight_bias_conv2d",
     "init_weight_bias_norm",
-    "reinit_net",
-    "init_residual_aware",
-    "inference_init",
-    # Training utilities
-    "TAGIMonitor",
-    "sweep_gains",
-    "sweep_sigma_v",
-    "compare_heads",
-    "auto_tune",
-    "find_best_gain",
-    "find_best_sigma_v",
-    "AdamTAGI",
-    "NadamTAGI",
-    "StateSpaceMomentum",
+    # Hierarchical softmax
+    "HierarchicalSoftmax",
+    "class_to_obs",
+    "labels_to_hrc",
+    "obs_to_class_probs",
+    "get_predicted_labels",
+    # Run management
+    "RunDir",
+    "load_model",
 ]

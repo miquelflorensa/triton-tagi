@@ -1,9 +1,19 @@
 """
 Bayesian AvgPool2D layer for TAGI.
 
-Average pooling for both means and variances:
-    μ_out = (1/k²) · Σ μ_in       (within each k×k window)
-    S_out = (1/k²) · Σ S_in       (Assuming high spatial correlation, variance scales as 1/k²)
+Average pooling for means:
+    μ_out = (1/k²) · Σ μ_in
+
+Variance pooling depends on `spatial_correlation`:
+    - False (default): S_out = (1/k⁴) · Σ S_in
+          assumes pixel independence (strict Bayesian); variance collapses by
+          1/k² at each pool.  Matches cuTAGI's historical behaviour.
+    - True:  S_out = (1/k²) · Σ S_in
+          assumes the k×k window is strongly correlated (ρ≈1); preserves the
+          magnitude of the variance signal through pooling bottlenecks.
+          Experimental — turn on for variance-preservation ablations; net
+          init may need retuning since downstream variance is up to k² per
+          pool layer larger than in the default branch.
 
 All computation done in a single fused Triton kernel per direction.
 """
@@ -39,6 +49,7 @@ def _avg_pool_fwd_kernel(
     W_out,
     k,
     inv_k2,
+    var_scale,
     BLOCK: tl.constexpr,
 ):
     """Fused avg-pool for mean and variance in one kernel."""
@@ -67,9 +78,10 @@ def _avg_pool_fwd_kernel(
             sum_m += m
             sum_s += s
 
-    # Both mean and variance use inv_k2 due to spatial correlation
+    # Mean divides by k²; variance scale chosen by `spatial_correlation` flag
+    # (1/k² correlated, 1/k⁴ independent — passed in as `var_scale`).
     tl.store(ma_out_ptr + offs, sum_m * inv_k2, mask=valid)
-    tl.store(Sa_out_ptr + offs, sum_s * inv_k2, mask=valid)
+    tl.store(Sa_out_ptr + offs, sum_s * var_scale, mask=valid)
 
 
 # ======================================================================
@@ -91,6 +103,7 @@ def _avg_pool_bwd_kernel(
     W_out,
     k,
     inv_k2,
+    var_scale,
     BLOCK: tl.constexpr,
 ):
     """Backward: distribute delta equally into k×k block."""
@@ -112,9 +125,9 @@ def _avg_pool_bwd_kernel(
     dm = tl.load(dm_ptr + idx, mask=valid, other=0.0)
     ds = tl.load(ds_ptr + idx, mask=valid, other=0.0)
 
-    # Both mean and variance gradients use inv_k2
+    # Mean delta scales by 1/k²; variance delta scale matches forward (var_scale).
     tl.store(dm_out_ptr + offs, dm * inv_k2, mask=valid)
-    tl.store(ds_out_ptr + offs, ds * inv_k2, mask=valid)
+    tl.store(ds_out_ptr + offs, ds * var_scale, mask=valid)
 
 
 # ======================================================================
@@ -128,11 +141,18 @@ class AvgPool2D(Layer):
 
     Parameters
     ----------
-    kernel_size : int  pooling window size (square)
+    kernel_size : int   pooling window size (square)
+    spatial_correlation : bool, default False
+        If True, treat the k×k window as strongly correlated (ρ≈1) and scale the
+        output variance by 1/k² instead of 1/k⁴.  Prevents variance starvation
+        through pooling layers but up-amplifies downstream variance — nets may
+        need retuning.  Default False matches cuTAGI's strict-independence
+        behaviour.
     """
 
-    def __init__(self, kernel_size: int) -> None:
+    def __init__(self, kernel_size: int, spatial_correlation: bool = False) -> None:
         self.k = kernel_size
+        self.spatial_correlation = spatial_correlation
         self.input_shape = None
 
     def forward(self, ma: Tensor, Sa: Tensor) -> tuple[Tensor, Tensor]:
@@ -156,6 +176,9 @@ class AvgPool2D(Layer):
         ma_out = torch.empty(N, C, H_out, W_out, device=ma.device, dtype=ma.dtype)
         Sa_out = torch.empty_like(ma_out)
 
+        inv_k2 = 1.0 / (k * k)
+        var_scale = inv_k2 if self.spatial_correlation else inv_k2 * inv_k2
+
         _avg_pool_fwd_kernel[(triton.cdiv(total, BLOCK),)](
             ma,
             Sa,
@@ -168,7 +191,8 @@ class AvgPool2D(Layer):
             H_out,
             W_out,
             k,
-            1.0 / (k * k),
+            inv_k2,
+            var_scale,
             BLOCK=BLOCK,
         )
         return ma_out, Sa_out
@@ -193,6 +217,9 @@ class AvgPool2D(Layer):
         dm_out = torch.empty(N, C, H, W, device=dm.device, dtype=dm.dtype)
         ds_out = torch.empty_like(dm_out)
 
+        inv_k2 = 1.0 / (k * k)
+        var_scale = inv_k2 if self.spatial_correlation else inv_k2 * inv_k2
+
         _avg_pool_bwd_kernel[(triton.cdiv(total, BLOCK),)](
             dm,
             ds,
@@ -205,10 +232,12 @@ class AvgPool2D(Layer):
             H_out,
             W_out,
             k,
-            1.0 / (k * k),
+            inv_k2,
+            var_scale,
             BLOCK=BLOCK,
         )
         return dm_out, ds_out
 
     def __repr__(self):
-        return f"AvgPool2D(kernel={self.k})"
+        sc = "on" if self.spatial_correlation else "off"
+        return f"AvgPool2D(kernel={self.k}, spatial_correlation={sc})"

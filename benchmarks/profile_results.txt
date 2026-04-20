@@ -1,0 +1,69 @@
+# Profiling Results: triton-tagi CUDA Bottlenecks
+
+**GPU:** NVIDIA GeForce RTX 4070 Ti SUPER  
+**Batch size:** 256  
+**Profiled steps:** 20 (after 10 warmup steps)  
+
+Top-10 ops by CUDA self-time. Ops marked ◀ TOP are the three biggest bottlenecks.
+
+---
+
+## Linear(512→512)
+
+```
+Op                                                     CPU ms  CUDA ms  CUDA%  Calls
+--------------------------------------------------------------------------------------
+_fused_backward_delta_kernel                            0.000    1.011  25.6%     20  ◀ TOP
+_fused_var_forward_kernel                               0.000    0.664  16.8%     20  ◀ TOP
+aten::mm                                                4.165    0.645  16.3%     60  ◀ TOP
+ampere_sgemm_64x32_sliced1x4_nt                         0.000    0.405  10.3%     40
+ampere_sgemm_32x32_sliced1x4_nn                         0.000    0.240   6.1%     20
+aten::sum                                               0.805    0.210   5.3%     40
+void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4> >(at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4>)    0.000    0.210   5.3%     40
+aten::mul                                               0.935    0.115   2.9%     80
+void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> >, at::detail::Array<char*, 3> >(int, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> >, at::detail::Array<char*, 3>)    0.000    0.115   2.9%     80
+_capped_param_update_kernel                             0.000    0.096   2.4%     40
+--------------------------------------------------------------------------------------
+Total CUDA time (self):                                          3.948
+
+```
+
+## Conv2D network
+
+```
+Op                                                     CPU ms  CUDA ms  CUDA%  Calls
+--------------------------------------------------------------------------------------
+_col2im_kernel                                          0.000   13.763  15.9%     40  ◀ TOP
+_fused_var_forward_kernel                               0.000   13.422  15.5%     40  ◀ TOP
+_fused_backward_delta_kernel                            0.000   13.100  15.2%     40  ◀ TOP
+aten::mm                                                4.644   11.065  12.8%    120
+_im2col_kernel                                          0.000    6.654   7.7%     40
+void cutlass::Kernel<cutlass_80_simt_sgemm_32x128_8x5_nt_align1>(cutlass_80_simt_sgemm_32x128_8x5_nt_align1::Params)    0.000    6.369   7.4%     40
+aten::pow                                               1.937    3.895   4.5%    120
+void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespace)::pow_tensor_scalar_kernel_impl<float, float>(at::TensorIteratorBase&, float)::{lambda(float)#1}, at::detail::Array<char*, 2> >(int, at::native::(anonymous namespace)::pow_tensor_scalar_kernel_impl<float, float>(at::TensorIteratorBase&, float)::{lambda(float)#1}, at::detail::Array<char*, 2>)    0.000    3.895   4.5%    120
+ampere_sgemm_64x64_nn                                   0.000    3.482   4.0%     20
+aten::copy_                                             0.917    2.075   2.4%     80
+--------------------------------------------------------------------------------------
+Total CUDA time (self):                                         86.405
+
+```
+
+## BatchNorm2D network
+
+```
+Op                                                     CPU ms  CUDA ms  CUDA%  Calls
+--------------------------------------------------------------------------------------
+_col2im_kernel                                          0.000   13.276  14.7%     40  ◀ TOP
+_fused_var_forward_kernel                               0.000   12.790  14.1%     40  ◀ TOP
+_fused_backward_delta_kernel                            0.000   12.431  13.7%     40  ◀ TOP
+aten::mm                                                3.153   10.937  12.1%    120
+_im2col_kernel                                          0.000    6.536   7.2%     40
+void cutlass::Kernel<cutlass_80_simt_sgemm_32x128_8x5_nt_align1>(cutlass_80_simt_sgemm_32x128_8x5_nt_align1::Params)    0.000    6.295   7.0%     40
+aten::pow                                               2.789    4.029   4.4%    180
+void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespace)::pow_tensor_scalar_kernel_impl<float, float>(at::TensorIteratorBase&, float)::{lambda(float)#1}, at::detail::Array<char*, 2> >(int, at::native::(anonymous namespace)::pow_tensor_scalar_kernel_impl<float, float>(at::TensorIteratorBase&, float)::{lambda(float)#1}, at::detail::Array<char*, 2>)    0.000    4.029   4.4%    180
+ampere_sgemm_64x64_nn                                   0.000    3.467   3.8%     20
+aten::mul                                               5.747    2.193   2.4%    460
+--------------------------------------------------------------------------------------
+Total CUDA time (self):                                         90.545
+
+```

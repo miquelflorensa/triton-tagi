@@ -31,10 +31,8 @@ import torch
 from torch import Tensor
 
 from .base import Layer, LearnableLayer
-from .layers.frn_resblock import FRNResBlock
 from .layers.resblock import ResBlock
-from .layers.shared_var_resblock import SharedVarResBlock
-from .update.observation import compute_innovation
+from .update.observation import compute_innovation, compute_innovation_with_indices
 from .update.parameters import get_cap_factor
 
 
@@ -54,7 +52,7 @@ class Sequential:
 
         # Move learnable layers to the target device
         for layer in self.layers:
-            if isinstance(layer, (ResBlock, SharedVarResBlock, FRNResBlock)):
+            if isinstance(layer, ResBlock):
                 # These blocks manage their own sub-layers
                 layer.device = self.device
                 for sub in layer._learnable:
@@ -140,6 +138,66 @@ class Sequential:
             delta_mu, delta_var = layer.backward(delta_mu, delta_var)
 
         # ── 4. Capped parameter update (cuTAGI-style) ──
+        cap_factor = get_cap_factor(batch_size)
+        for layer in self.layers:
+            if isinstance(layer, LearnableLayer):
+                layer.update(cap_factor)
+
+        return y_pred_mu, y_pred_var
+
+    # ------------------------------------------------------------------
+    #  Hierarchical softmax training step
+    # ------------------------------------------------------------------
+    def step_hrc(
+        self,
+        x_batch: Tensor,
+        labels: Tensor,
+        hrc: "HierarchicalSoftmax",
+        sigma_v: float,
+    ) -> tuple[Tensor, Tensor]:
+        """One forward + backward + capped-update step using hierarchical softmax.
+
+        Uses the sparse output innovation from :func:`compute_innovation_with_indices`
+        so that only the ``n_obs`` tree nodes on each class's binary path receive
+        an update signal, matching cuTAGI's ``update_using_indices``.
+
+        The output layer must have ``hrc.len`` output neurons::
+
+            net = Sequential([..., Linear(hidden, hrc.len)])
+
+        Args:
+            x_batch: Input mini-batch, shape (B, in_features).
+            labels:  Integer class labels, shape (B,).
+            hrc:     HierarchicalSoftmax from :func:`triton_tagi.hrc_softmax.class_to_obs`.
+            sigma_v: Observation noise standard deviation.
+
+        Returns:
+            y_pred_mu:  Predicted output means before update, shape (B, hrc.len).
+            y_pred_var: Predicted output variances before update, shape (B, hrc.len).
+        """
+        from .hrc_softmax import labels_to_hrc
+
+        batch_size = x_batch.shape[0]
+
+        # 1. Forward pass
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+
+        # 2. Encode labels → (obs ±1, 1-indexed node positions)
+        y_obs, y_idx = labels_to_hrc(labels, hrc)
+
+        # var_obs: scalar sigma_v^2 broadcast to (B, n_obs)
+        var_obs = torch.full_like(y_obs, sigma_v**2)
+
+        # 3. Sparse output innovation
+        delta_mu, delta_var = compute_innovation_with_indices(
+            y_pred_mu, y_pred_var, y_obs, var_obs, y_idx
+        )
+
+        # 4. Backward pass (identical to dense step)
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+
+        # 5. Capped parameter update
         cap_factor = get_cap_factor(batch_size)
         for layer in self.layers:
             if isinstance(layer, LearnableLayer):

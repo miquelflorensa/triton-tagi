@@ -12,10 +12,8 @@ where φ and Φ are the standard normal PDF and CDF respectively.
 
 Numerical notes
 ---------------
-These formulas match cuTAGI's mixture_relu_mean_var exactly.  No floors or
-Cauchy-Schwarz clamps are applied (they were previously present but are not in
-cuTAGI; removing them was correct).  S_a is floored at 0 to guard against the
-rare fp32 negative-variance artefact.
+var_a is floored at 0 to keep variance non-negative; mu_a has no floor,
+matching the exact cuTAGI mixture_relu_mean_var_cuda formula.
 
 CDF precision: the standard formula 0.5*(1+erf(α/√2)) suffers catastrophic
 cancellation for α ≤ −6 in fp32, returning exactly 0 when the true value is
@@ -78,10 +76,9 @@ def _bayesian_relu_kernel(
     cdf_asym = pdf / (-alpha)          # accurate for alpha ≪ 0; pdf/|α| > 0 always
     cdf = tl.where(alpha < -5.0, cdf_asym, cdf_erf)
 
-    # Exact moments — no 1e-7 floor, matching cuTAGI mixture_relu_mean_var.
+    # Exact moments matching cuTAGI mixture_relu_mean_var_cuda.
     mu_a = sigma_z * pdf + mz * cdf
     var_a = -mu_a * mu_a + 2.0 * mu_a * mz - mz * sigma_z * pdf + (Sz_safe - mz * mz) * cdf
-    # Floor var_a at 0 (not 1e-7) to guard against rare fp32 negative artifact.
     var_a = tl.maximum(var_a, 0.0)
 
     tl.store(ma_ptr + offs, mu_a, mask=valid)

@@ -192,11 +192,12 @@ class Conv2D(LearnableLayer):
 
     Parameters
     ----------
-    C_in        : int  input channels
-    C_out       : int  output channels (filters)
-    kernel_size : int  square kernel size
-    stride      : int  (default 1)
-    padding     : int  (default 0)
+    C_in         : int  input channels
+    C_out        : int  output channels (filters)
+    kernel_size  : int  square kernel size
+    stride       : int  (default 1)
+    padding      : int  (default 0)
+    padding_type : int  1 = symmetric (PyTorch default), 2 = right-bottom only (cuTAGI style)
     device      : str or torch.device
     init_method : str  "He" or "Xavier" (default "He")
     gain_w      : float  gain multiplier for weight variance (default 1.0)
@@ -210,6 +211,7 @@ class Conv2D(LearnableLayer):
         kernel_size: int,
         stride: int = 1,
         padding: int = 0,
+        padding_type: int = 1,
         device: str = "cuda",
         init_method: str = "He",
         gain_w: float = 1.0,
@@ -220,6 +222,7 @@ class Conv2D(LearnableLayer):
         self.kH = self.kW = kernel_size
         self.stride = stride
         self.padding = padding
+        self.padding_type = padding_type  # 1=symmetric, 2=right-bottom (cuTAGI)
         self.device = torch.device(device)
 
         # --- cuTAGI-style initialization ---
@@ -250,6 +253,15 @@ class Conv2D(LearnableLayer):
     # ------------------------------------------------------------------
     def forward(self, ma: Tensor, Sa: Tensor) -> tuple[Tensor, Tensor]:
         """
+        Propagate Gaussian moments through a Conv2D layer via im2col.
+
+        im2col unfolds the input into a patch matrix P of shape (N·L, K)
+        where L = H_out·W_out and K = C_in·kH·kW.  The layer then reduces
+        to a Linear layer on P:
+
+            μ_z = P_μ @ μ_w + μ_b
+            S_z = P_μ² @ S_w  +  P_S @ (μ_w² + S_w)  +  S_b
+
         Parameters
         ----------
         ma : Tensor (N, C_in, H, W)  activation means
@@ -262,13 +274,27 @@ class Conv2D(LearnableLayer):
         """
         N, C, H, W = ma.shape
         self.input_shape = (N, C, H, W)
-        H_out = (H + 2 * self.padding - self.kH) // self.stride + 1
-        W_out = (W + 2 * self.padding - self.kW) // self.stride + 1
+
+        # padding_type=2: right-bottom only (cuTAGI convention for stride>1 convs).
+        # Pre-pad so im2col sees a (H+pad, W+pad) input with symmetric padding=0.
+        if self.padding_type == 2 and self.padding > 0:
+            p = self.padding
+            ma_in = torch.nn.functional.pad(ma, (0, p, 0, p))
+            Sa_in = torch.nn.functional.pad(Sa, (0, p, 0, p))
+            H_out = (H + p - self.kH) // self.stride + 1
+            W_out = (W + p - self.kW) // self.stride + 1
+            im2col_pad = 0
+        else:
+            ma_in, Sa_in = ma, Sa
+            H_out = (H + 2 * self.padding - self.kH) // self.stride + 1
+            W_out = (W + 2 * self.padding - self.kW) // self.stride + 1
+            im2col_pad = self.padding
+
         self.spatial = (H_out, W_out)
 
-        # im2col: (N, C_in, H, W) → (N·L, K)
-        patches_ma = _triton_im2col(ma, self.kH, self.kW, self.stride, self.padding)
-        patches_Sa = _triton_im2col(Sa, self.kH, self.kW, self.stride, self.padding)
+        # im2col: (N, C_in, H_in, W_in) → (N·L, K)
+        patches_ma = _triton_im2col(ma_in, self.kH, self.kW, self.stride, im2col_pad)
+        patches_Sa = _triton_im2col(Sa_in, self.kH, self.kW, self.stride, im2col_pad)
         self.patches_ma = patches_ma
 
         # Mean: cuBLAS matmul + bias
@@ -287,7 +313,17 @@ class Conv2D(LearnableLayer):
     # ------------------------------------------------------------------
     def backward(self, delta_mz: Tensor, delta_Sz: Tensor) -> tuple[Tensor, Tensor]:
         """
-        Compute parameter deltas and propagate to the previous layer.
+        Compute parameter deltas and back-propagate innovation deltas.
+
+        In patch space (P is the im2col patch matrix, shape N·L × K):
+
+            Δμ_w = S_w · (P_μ^T @ δμ_z)       Δμ_b = S_b · Σ δμ_z
+            ΔS_w = S_w² · (P_μ²)^T @ δS_z)    ΔS_b = S_b² · Σ δS_z
+
+            δP_μ = δμ_z @ μ_w^T
+            δP_S = δS_z @ (μ_w²)^T
+
+        col2im folds (δP_μ, δP_S) back from patch space to spatial layout.
 
         Parameters
         ----------
@@ -322,8 +358,16 @@ class Conv2D(LearnableLayer):
 
         # ── col2im: (N·L, K) → (N, C_in, H, W) ──
         _, C, H, W = self.input_shape
-        d_ma = _triton_col2im(dp_ma, N, C, H, W, self.kH, self.kW, self.stride, self.padding)
-        d_Sa = _triton_col2im(dp_Sa, N, C, H, W, self.kH, self.kW, self.stride, self.padding)
+        if self.padding_type == 2 and self.padding > 0:
+            p = self.padding
+            # col2im onto padded dims, then crop right/bottom padding away
+            d_ma_p = _triton_col2im(dp_ma, N, C, H + p, W + p, self.kH, self.kW, self.stride, 0)
+            d_Sa_p = _triton_col2im(dp_Sa, N, C, H + p, W + p, self.kH, self.kW, self.stride, 0)
+            d_ma = d_ma_p[:, :, :H, :W].contiguous()
+            d_Sa = d_Sa_p[:, :, :H, :W].contiguous()
+        else:
+            d_ma = _triton_col2im(dp_ma, N, C, H, W, self.kH, self.kW, self.stride, self.padding)
+            d_Sa = _triton_col2im(dp_Sa, N, C, H, W, self.kH, self.kW, self.stride, self.padding)
         return d_ma, d_Sa
 
     # ------------------------------------------------------------------

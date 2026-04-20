@@ -1,345 +1,210 @@
-# TAGI-Triton
+# triton-tagi
 
-**GPU-Accelerated Tractable Approximate Gaussian Inference for Bayesian Neural Networks**
+**Tractable Approximate Gaussian Inference (TAGI) for Bayesian Neural Networks, in Python + Triton.**
 
-TAGI-Triton is a high-performance library for training and running Bayesian neural networks (BNNs) using [Tractable Approximate Gaussian Inference (TAGI)](https://www.jmlr.org/papers/v22/20-1009.html). All heavy computations — variance propagation, Bayesian activations, parameter updates — are implemented as fused [Triton](https://triton-lang.org/) kernels for maximum GPU throughput.
+A minimal, GPU-accelerated reimplementation of [cuTAGI](https://github.com/lhnguyen102/cuTAGI)
+(C++/CUDA) with numerical parity on its headline examples and fused
+[Triton](https://triton-lang.org/) kernels for the hot paths.
 
-> **Key idea:** Instead of backpropagation with point-estimate weights, TAGI propagates Gaussian distributions (mean + variance) through the network and performs closed-form Bayesian updates — no sampling, no variational bounds, no autograd.
-
----
-
-## Features
-
-| Feature | Description |
-|---|---|
-| **Fused Triton Kernels** | Variance-forward, backward-delta, ReLU moments, parameter updates — all in custom Triton kernels |
-| **Modular Layer API** | `Linear`, `Conv2D`, `BatchNorm2D`, `ResBlock`, `AvgPool2D`, `Flatten` |
-| **Bayesian Activations** | `ReLU`, `LeakyReLU`, `EvenSoftplus` — moment-propagation through nonlinearities |
-| **Classification Heads** | `Remax` (softmax alternative) and `Bernoulli` (max-indicator via Gauss-Hermite quadrature) |
-| **Shared Variance Layers** | `SharedVarLinear`, `SharedVarConv2D`, `SharedVarBatchNorm2D`, `SharedVarResBlock` — scalar variance per layer for regularization |
-| **Optimizers** | Vanilla TAGI, `AdamTAGI`, `NadamTAGI` — gradient-free adaptive optimization |
-| **Auto-Tune** | Automatic gain and σ_v selection via forward-only variance analysis + short training probes |
-| **Monitoring** | `TAGIMonitor` — activation/parameter/signal-flow diagnostics with built-in plotting |
-| **ResNet Support** | Full residual blocks with projection shortcuts (cuTAGI-compatible) |
+> **Idea.** TAGI treats every weight and activation as a Gaussian. The forward
+> pass propagates `(mean, variance)` analytically through each layer; the
+> backward pass applies closed-form Bayesian updates to the parameters. No
+> sampling, no variational bounds, no autograd.
 
 ---
 
-## Installation
+## Status
 
-### Prerequisites
+- **Library version:** 0.2.0 (scoped down 2026-04-19 to a minimal cuTAGI-parity core).
+- **Parity:** every kept example reproduces its cuTAGI counterpart at Phase-1
+  tolerance; see [`PLAN.md`](PLAN.md) §3 for the table.
+- **Tests:** 95 unit + 77 validation pass on CUDA.
+- **Archive:** layers, optimizers, and diagnostics outside the minimal scope
+  live under [`_archive/`](_archive/); nothing deleted.
 
-- Python ≥ 3.10
-- CUDA-capable GPU
-- PyTorch ≥ 2.0 (with CUDA)
-- [Triton](https://triton-lang.org/) ≥ 2.0
+### Recent milestones
 
-### Setup
+- **2026-04-20.** Remax reimplemented to match cuTAGI's MixtureReLU plus
+  log-normal covariance path. CIFAR-10 ResNet-18 + Remax now trains to ≥80%
+  test accuracy in ~15 epochs with `gain_w=gain_b=0.1` and σ_v ∈ {0.01, 0.05}.
+
+---
+
+## Install
 
 ```bash
 git clone https://github.com/miquelflorensa/triton-tagi.git
 cd triton-tagi
-
-pip install torch torchvision  # with CUDA support
-pip install triton
-pip install numpy matplotlib
+pip install -e .           # core: torch, triton, numpy
+pip install -e ".[vis]"    # + matplotlib for figures
+pip install -e ".[dev]"    # + pytest, ruff
 ```
+
+Requires Python ≥ 3.10, PyTorch ≥ 2.0 with CUDA, and Triton ≥ 2.0.
 
 ---
 
-## Quick Start
-
-### MLP Classification (MNIST)
+## Quick start
 
 ```python
 import torch
-from src import Sequential
-from src.layers import Linear, ReLU, Remax
+from triton_tagi import Linear, ReLU, Remax, Sequential
 
 device = torch.device("cuda")
+net = Sequential(
+    [
+        Linear(784, 256, device=device),
+        ReLU(),
+        Linear(256, 128, device=device),
+        ReLU(),
+        Linear(128, 10, device=device),
+        Remax(),
+    ],
+    device=device,
+)
 
-net = Sequential([
-    Linear(784, 256, device=device),
-    ReLU(),
-    Linear(256, 128, device=device),
-    ReLU(),
-    Linear(128, 10, device=device),
-    Remax(),
-], device=device)
-
-# Single training step
-sigma_v = 0.01
-y_pred_mu, y_pred_var = net.step(x_batch, y_batch, sigma_v)
+# One closed-form Bayesian update step
+y_pred_mu, y_pred_var = net.step(x_batch, y_batch_onehot, sigma_v=0.05)
 ```
 
-### CNN Classification (CIFAR-10)
+Every example under [`examples/`](examples/) follows the same `RunDir` and
+`argparse` convention (see [PLAN.md](PLAN.md) §3.1):
 
-```python
-from src import Sequential
-from src.layers import Conv2D, ReLU, AvgPool2D, BatchNorm2D, Flatten, Linear, Remax
-
-net = Sequential([
-    Conv2D(3, 32, 5, stride=1, padding=2, device=device),
-    ReLU(),
-    BatchNorm2D(32, device=device),
-    AvgPool2D(2),
-
-    Conv2D(32, 64, 5, stride=1, padding=2, device=device),
-    ReLU(),
-    BatchNorm2D(64, device=device),
-    AvgPool2D(2),
-
-    Flatten(),
-    Linear(64 * 8 * 8, 256, device=device),
-    ReLU(),
-    Linear(256, 10, device=device),
-    Remax(),
-], device=device)
-```
-
-### ResNet-18
-
-```python
-from src import Sequential
-from src.layers import Conv2D, ReLU, BatchNorm2D, AvgPool2D, Flatten, Linear, Remax, ResBlock
-
-net = Sequential([
-    Conv2D(3, 64, 3, stride=1, padding=1, device=device),
-    ReLU(),
-    BatchNorm2D(64, device=device),
-
-    ResBlock(64, 64, stride=1, device=device),
-    ResBlock(64, 64, stride=1, device=device),
-    ResBlock(64, 128, stride=2, device=device),   # projection shortcut
-    ResBlock(128, 128, stride=1, device=device),
-    ResBlock(128, 256, stride=2, device=device),
-    ResBlock(256, 256, stride=1, device=device),
-    ResBlock(256, 512, stride=2, device=device),
-    ResBlock(512, 512, stride=1, device=device),
-
-    AvgPool2D(4),
-    Flatten(),
-    Linear(512, 10, device=device),
-    Remax(),
-], device=device)
-```
-
-### Using an Optimizer
-
-```python
-from src import Sequential, AdamTAGI
-
-net = Sequential([...], device=device)
-opt = AdamTAGI(net)
-
-for epoch in range(n_epochs):
-    for xb, yb in batches:
-        y_pred_mu, y_pred_var = opt.step(xb, yb, sigma_v)
+```bash
+python examples/mnist_mlp.py --n_epochs 5
+python examples/mnist_cnn.py
+python examples/cifar10_cnn.py --n_epochs 100
+python examples/cifar10_resnet18.py --n_epochs 100 --gain_w 0.1 --gain_b 0.1
+python examples/cifar10_resnet18_hrc.py
+python examples/regression.py
+python examples/regression_heteros.py
+python examples/custom_layer.py         # tutorial: write your own Triton layer
 ```
 
 ---
 
-## Architecture
+## Library surface
 
-```
-src/
-├── __init__.py              # Public API
-├── network.py               # Sequential container (forward / step / train / eval)
-├── optimizer.py             # AdamTAGI optimizer
-├── nadam_optimizer.py       # NadamTAGI optimizer
-├── auto_tune.py             # Automatic gain & σ_v selection
-├── monitor.py               # TAGIMonitor, sweep_gains, sweep_sigma_v
-├── param_init.py            # He / Xavier / Gaussian initialization
-├── init.py                  # reinit_net, init_residual_aware
-├── kernels/
-│   └── common.py            # Low-level Triton kernel wrappers
-├── layers/
-│   ├── linear.py            # Bayesian fully-connected layer
-│   ├── conv2d.py            # Bayesian Conv2D (im2col + fused matmul)
-│   ├── batchnorm2d.py       # Bayesian Batch Normalization
-│   ├── resblock.py          # Residual block (cuTAGI-compatible)
-│   ├── relu.py              # Bayesian ReLU (moment propagation)
-│   ├── leaky_relu.py        # Bayesian Leaky ReLU
-│   ├── even_softplus.py     # Even Softplus activation
-│   ├── remax.py             # Remax classification head
-│   ├── bernoulli.py         # Bernoulli (max-indicator) classification
-│   ├── avgpool2d.py         # Average Pooling 2D
-│   ├── flatten.py           # Flatten layer
-│   ├── shared_var_*.py      # Shared-variance variants of layers
-│   └── __init__.py
-└── update/
-    ├── observation.py       # Output innovation (δ_μ, δ_S)
-    ├── parameters.py        # Capped parameter update (cuTAGI-style)
-    └── shared_var_parameters.py
-```
+Everything lives under `triton_tagi/`. The package is deliberately small;
+reading it top-to-bottom in an evening is a goal, not an accident.
+
+### Layers (`triton_tagi/layers/`)
+
+| Layer | Used by |
+|---|---|
+| `Linear` | MLP, CNN/ResNet heads |
+| `Conv2D` | CNN, ResNet |
+| `BatchNorm2D` | CNN, ResNet |
+| `LayerNorm` | MLP variant |
+| `AvgPool2D`, `MaxPool2D` | CNN, ResNet stem/head |
+| `ReLU` | all non-linear examples |
+| `Flatten` | conv→FC boundary |
+| `Remax` | classification head (cuTAGI-native) |
+| `ResBlock` + `Add` | ResNet-18 |
+| `EvenSoftplus` | heteroscedastic regression noise head |
+
+### Top-level
+
+- `base.py`: `Layer`, `LearnableLayer` ABCs.
+- `network.py`: `Sequential` (forward / step / train / eval).
+- `param_init.py`: He / Xavier / Gaussian init.
+- `hrc_softmax.py`: hierarchical softmax output for many-class classification.
+- `checkpoint.py`: `RunDir` (run-directory manager) and `load_model`.
+- `kernels/common.py`: fused Triton kernels.
+- `update/observation.py`, `update/parameters.py`: innovation and parameter update rules.
 
 ---
 
-## How TAGI Works
+## How TAGI works (one page)
 
-In a standard neural network, weights are point estimates updated via backpropagation. In TAGI, every weight and activation is a **Gaussian random variable** characterized by its mean (μ) and variance (σ²).
+Every weight `W` and activation `a` is a Gaussian random variable described
+by its mean `μ` and variance `σ²`.
 
-### Forward Pass (Moment Propagation)
+**Forward (moment propagation).** For `z = a W + b`,
 
-For a linear layer $z = aW + b$:
+$$\mu_z = \mu_a\,\mu_W + \mu_b$$
 
-$$\mu_z = \mu_a \, \mu_W + \mu_b$$
+$$\sigma^2_z = \mu_a^2\,\sigma^2_W + \sigma^2_a\,\mu_W^2 + \sigma^2_a\,\sigma^2_W + \sigma^2_b$$
 
-$$\sigma^2_z = \mu_a^2 \, \sigma^2_W + \sigma^2_a \, \mu_W^2 + \sigma^2_a \, \sigma^2_W + \sigma^2_b$$
+Nonlinearities propagate moments analytically. ReLU uses the Alric (2024)
+closed-form; Remax uses MixtureReLU plus log-normal identities, matching cuTAGI.
 
-### Backward Pass (Bayesian Update)
+**Backward (observation innovation).** At the output,
 
-TAGI computes **output innovation** at the output layer:
+$$\delta_\mu = \frac{y - \mu_z}{\sigma^2_z + \sigma^2_v}, \qquad \delta_\sigma = \frac{-1}{\sigma^2_z + \sigma^2_v}.$$
 
-$$\delta_\mu = \frac{y - \mu_z}{\sigma^2_z + \sigma^2_v}, \qquad \delta_\sigma = \frac{-1}{\sigma^2_z + \sigma^2_v}$$
+Deltas propagate backward through each layer; no autograd.
 
-These deltas propagate backward through each layer, updating both means and variances in closed form — no gradient computation required.
-
-### Parameter Update (Capped)
-
-Parameters are updated using a precision-space rule with adaptive capping to prevent overshooting:
+**Parameter update (capped, cuTAGI-style).**
 
 $$\mu_W^{\text{new}} = \mu_W + \sigma^2_W \cdot \Delta_\mu$$
 
-$$\sigma^{2,\text{new}}_W = \max\!\left(\sigma^2_W + (\sigma^2_W)^2 \cdot \Delta_\sigma,\; \epsilon\right)$$
+$$\sigma^{2,\text{new}}_W = \max\!\left(\sigma^2_W + (\sigma^2_W)^2 \cdot \Delta_\sigma,\;\epsilon\right)$$
 
 ---
 
-## Training Scripts
+## Writing a custom layer
 
-| Script | Description |
-|---|---|
-| `train_mnist.py` | MNIST FNN: PyTorch vs Triton comparison |
-| `train_mnist_cnn.py` | MNIST LeNet-style CNN |
-| `train_cifar10.py` | CIFAR-10 3-layer CNN |
-| `train_cifar10_3block.py` | CIFAR-10 extended CNN |
-| `train_mnist_shared_var.py` | MNIST with shared-variance layers |
-| `run_resnet18.py` | ResNet-18 on CIFAR-10 |
-| `run_resnet18_cifar100.py` | ResNet-18 on CIFAR-100 |
-| `run_cifar10_adam.py` | CIFAR-10 with AdamTAGI optimizer |
-| `run_cifar10_nadam.py` | CIFAR-10 with NadamTAGI optimizer |
-| `benchmark.py` | Wall-clock benchmarks (PyTorch vs Triton) |
-| `test_auto_tune.py` | Auto-tune smoke test |
+Subclass `Layer` (pure moment propagation) or `LearnableLayer` (adds `update`
+and `num_parameters`), implement `forward` and `backward`, and you are done.
+No registry, no decorators. See [`examples/custom_layer.py`](examples/custom_layer.py)
+for an end-to-end ELU tutorial: Triton kernel, `Layer` subclass, MNIST run.
 
 ---
 
-## Monitoring & Diagnostics
+## Tests
 
-### TAGIMonitor
-
-Track activation statistics, parameter health, and signal flow throughout training:
-
-```python
-from src.monitor import TAGIMonitor
-
-monitor = TAGIMonitor(net, log_dir="run_logs")
-
-for epoch in range(n_epochs):
-    for xb, yb in batches:
-        net.step(xb, yb, sigma_v)
-    monitor.record(epoch, x_probe=x_train[:256])
-    monitor.print_report()
-
-monitor.plot("monitor.png")
+```bash
+pytest tests/unit                 # ~95 tests, fast
+pytest tests/validation           # ~77 tests; compares to pytagi reference
+pytest -m "not slow and not cuda" # CPU subset
 ```
 
-### Gain Sweep
-
-Find the best initialization gain by analyzing per-layer variance flow:
-
-```python
-from src.monitor import sweep_gains
-
-sweep_gains(
-    builder_fn=lambda gw: build_net(gain_w=gw),
-    x_probe=x_train[:256],
-    gains=[0.001, 0.01, 0.1, 0.5, 1.0, 2.0],
-    filename="gain_sweep.png",
-)
-```
-
-### Auto-Tune
-
-Automatically find the best gain and observation noise:
-
-```python
-from src.auto_tune import auto_tune
-
-result = auto_tune(
-    builder_fn=lambda gw, gb: build_net(gain_w=gw, gain_b=gb),
-    x_probe=x_train[:512],
-    y_probe=y_train_oh[:512],
-    x_eval=x_test[:1000],
-    y_eval=y_test_labels[:1000],
-)
-print(f"Best gain_w={result.gain_w}, gain_b={result.gain_b}, sigma_v={result.sigma_v}")
-```
+Validation tests assert `torch.testing.assert_close(atol=1e-5, rtol=0)`
+against a pytagi reference run on the same batch.
 
 ---
 
-## Classification Heads
+## Benchmarks
 
-### Remax
+See [`benchmarks/results.md`](benchmarks/results.md). Summary on an RTX 4070
+Ti SUPER, median of 50 runs:
 
-A softmax alternative for Bayesian networks that operates in moment space. Computes output probabilities via ReLU normalization of the logit distribution — no sampling required.
+| Layer / batch 1024 | triton-tagi | cuTAGI | Speedup |
+|---|---:|---:|---:|
+| Linear(512, 512) | 0.64 ms | 45.0 ms | **70×** |
+| Conv2D net | 11.0 ms | 106 ms | **9.7×** |
+| BatchNorm2D net | 12.5 ms | 109 ms | **8.7×** |
 
-```python
-from src.layers import Remax
-# Use as the final layer in a classification network
-net = Sequential([..., Linear(256, 10, device=device), Remax()], device=device)
-```
-
-### Bernoulli
-
-Max-indicator probabilities computed via Gauss-Hermite quadrature: $P_i = P(Z_i = \max_j Z_j)$.
-
-```python
-from src.layers import Bernoulli
-net = Sequential([..., Linear(256, 10, device=device), Bernoulli(n_gh=32)], device=device)
-```
-
----
-
-## Shared Variance
-
-Instead of maintaining one variance per parameter, shared-variance layers use a **single scalar variance** per layer for weights and biases. This acts as a natural regularizer and dramatically reduces the number of variance parameters:
-
-```python
-from src.layers import SharedVarLinear, SharedVarConv2D, SharedVarBatchNorm2D
-
-net = Sequential([
-    SharedVarConv2D(3, 32, 5, stride=1, padding=2, device=device),
-    ReLU(),
-    SharedVarBatchNorm2D(32, device=device),
-    AvgPool2D(2),
-    Flatten(),
-    SharedVarLinear(32 * 16 * 16, 10, device=device),
-    Remax(),
-], device=device)
-```
+triton-tagi wins on throughput; cuTAGI wins on small-batch latency, where
+dispatch overhead dominates.
 
 ---
 
 ## Relation to cuTAGI
 
-This library is a Triton-based reimplementation of [cuTAGI](https://github.com/lhnguyen102/cuTAGI), the reference C++/CUDA implementation of TAGI. Key design choices from cuTAGI are preserved:
+This is a Triton-based reimplementation of
+[cuTAGI](https://github.com/lhnguyen102/cuTAGI), the reference C++/CUDA TAGI
+library. Parity is load-bearing: every kept example must reproduce the cuTAGI
+result at Phase-1 tolerance on a fixed seed. In particular:
 
-- **Capped parameter updates** with batch-size-dependent cap factors
-- **cuTAGI-style backward pass**: compute deltas first, then apply capped updates
-- **ResBlock architecture**: identical to cuTAGI's `ResNetBlock` with projection shortcuts
-- **BatchNorm**: running statistics with EMA, matching cuTAGI's normalization
+- **Capped parameter updates** with batch-size-dependent cap factors.
+- **Backward order:** compute deltas first, apply capped updates after.
+- **ResBlock** identical to cuTAGI's `ResNetBlock` (projection shortcut).
+- **Remax** uses cuTAGI's MixtureReLU plus log-normal covariance path, not a
+  Softplus+Taylor approximation. See `triton_tagi/layers/remax.py`.
 
-The Triton implementation provides the same mathematical correctness with a more accessible Python-native codebase and automatic GPU kernel optimization.
+TF32 matmul is disabled at import time: cuTAGI uses scalar FMA with near-fp64
+accuracy, so leaving TF32 on would introduce systematic ~1e-3 variance errors
+and break parity.
 
 ---
 
 ## References
 
-- Goulet, J.-A., Nguyen, L. H., & Amiri, S. (2021). *Tractable Approximate Gaussian Inference for Bayesian Neural Networks*. JMLR, 22(228), 1–23. [[paper]](https://www.jmlr.org/papers/v22/20-1009.html)
-- cuTAGI: C++/CUDA implementation — [github.com/lhnguyen102/cuTAGI](https://github.com/lhnguyen102/cuTAGI)
-- Triton: OpenAI's GPU programming language — [triton-lang.org](https://triton-lang.org/)
-
----
-
-## License
-
-See [LICENSE](cuTAGI/LICENSE) for details.
+- Goulet, J.-A., Nguyen, L. H., & Amiri, S. (2021). *Tractable Approximate
+  Gaussian Inference for Bayesian Neural Networks*. JMLR 22(228), 1–23.
+  [[paper]](https://www.jmlr.org/papers/v22/20-1009.html)
+- Alric, L. (2024). Closed-form MixtureReLU moments.
+- cuTAGI: [github.com/lhnguyen102/cuTAGI](https://github.com/lhnguyen102/cuTAGI).
+- Triton: [triton-lang.org](https://triton-lang.org/).

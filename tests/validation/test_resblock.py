@@ -156,7 +156,7 @@ def test_resblock_projection_forward_mean():
     mz_blk, _ = blk.forward(ma, Sa)
 
     # Main path (stride=2 on first conv)
-    c1 = TConv2D(C_in, C_out, 3, stride=2, padding=1, device=DEVICE)
+    c1 = TConv2D(C_in, C_out, 3, stride=2, padding=1, padding_type=2, device=DEVICE)
     r1 = TReLU()
     b1 = TBatchNorm2D(C_out, device=DEVICE, preserve_var=False)
     c2 = TConv2D(C_out, C_out, 3, stride=1, padding=1, device=DEVICE)
