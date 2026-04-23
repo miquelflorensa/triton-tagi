@@ -14,6 +14,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "cuda: mark test as requiring a CUDA GPU (skip if unavailable)"
     )
+    config.addinivalue_line(
+        "markers", "slow: mark test as slow (run explicitly with -m slow)"
+    )
 
 
 def pytest_runtest_setup(item):

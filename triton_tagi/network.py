@@ -31,6 +31,7 @@ import torch
 from torch import Tensor
 
 from .base import Layer, LearnableLayer
+from .layers.multihead_attention import MultiheadAttentionV2
 from .layers.resblock import ResBlock
 from .update.observation import compute_innovation, compute_innovation_with_indices
 from .update.parameters import get_cap_factor
@@ -66,17 +67,22 @@ class Sequential:
 
     def _move_layer_to_device(self, layer):
         """Move a single layer's parameters to self.device."""
-        if not hasattr(layer, "mw"):
+        if isinstance(layer, MultiheadAttentionV2):
+            layer.device = self.device
+            for sub in (layer.q_proj, layer.k_proj, layer.v_proj):
+                self._move_layer_to_device(sub)
+            return
+        if not hasattr(layer, "mw") or layer.mw is None:
             return
         layer.device = self.device
         layer.mw = layer.mw.to(self.device)
-        if hasattr(layer, "Sw"):
+        if getattr(layer, "Sw", None) is not None:
             layer.Sw = layer.Sw.to(self.device)
-        if hasattr(layer, "mb"):
+        if getattr(layer, "mb", None) is not None:
             layer.mb = layer.mb.to(self.device)
-            if hasattr(layer, "Sb"):
+            if getattr(layer, "Sb", None) is not None:
                 layer.Sb = layer.Sb.to(self.device)
-        if hasattr(layer, "running_mean"):
+        if getattr(layer, "running_mean", None) is not None:
             layer.running_mean = layer.running_mean.to(self.device)
             layer.running_var = layer.running_var.to(self.device)
 
@@ -179,19 +185,31 @@ class Sequential:
 
         batch_size = x_batch.shape[0]
 
-        # 1. Forward pass
+        # 1. Forward pass. Sequence models output (B, S, hrc.len); flatten to
+        #    (B*S, hrc.len) for innovation, then reshape the delta back.
         y_pred_mu, y_pred_var = self.forward(x_batch)
+        pred_shape = y_pred_mu.shape
+        if y_pred_mu.dim() == 3:
+            ma_flat = y_pred_mu.reshape(-1, pred_shape[-1])
+            Sa_flat = y_pred_var.reshape(-1, pred_shape[-1])
+        else:
+            ma_flat = y_pred_mu
+            Sa_flat = y_pred_var
 
         # 2. Encode labels → (obs ±1, 1-indexed node positions)
         y_obs, y_idx = labels_to_hrc(labels, hrc)
 
-        # var_obs: scalar sigma_v^2 broadcast to (B, n_obs)
+        # var_obs: scalar sigma_v^2 broadcast to (N, n_obs)
         var_obs = torch.full_like(y_obs, sigma_v**2)
 
         # 3. Sparse output innovation
         delta_mu, delta_var = compute_innovation_with_indices(
-            y_pred_mu, y_pred_var, y_obs, var_obs, y_idx
+            ma_flat, Sa_flat, y_obs, var_obs, y_idx
         )
+
+        if y_pred_mu.dim() == 3:
+            delta_mu = delta_mu.reshape(pred_shape)
+            delta_var = delta_var.reshape(pred_shape)
 
         # 4. Backward pass (identical to dense step)
         for layer in reversed(self.layers):
@@ -232,3 +250,18 @@ class Sequential:
         return sum(
             layer.num_parameters for layer in self.layers if isinstance(layer, LearnableLayer)
         )
+
+    def get_attention_scores(self) -> dict[int, tuple[Tensor, Tensor]]:
+        """Collect attention score moments (μ, var) from every attention layer.
+
+        Returns an ordered dict keyed by the layer's position in ``self.layers``.
+        Each value is ``(mu_score, var_score)`` of shape ``(B, H, S, S)`` from
+        the most recent forward pass. Raises if no attention layer has run.
+        """
+        out: dict[int, tuple[Tensor, Tensor]] = {}
+        for i, layer in enumerate(self.layers):
+            if isinstance(layer, MultiheadAttentionV2):
+                out[i] = layer.get_attention_scores()
+        if not out:
+            raise RuntimeError("No attention layers in this Sequential.")
+        return out

@@ -18,12 +18,20 @@ A minimal, GPU-accelerated reimplementation of [cuTAGI](https://github.com/lhngu
 - **Library version:** 0.2.0 (scoped down 2026-04-19 to a minimal cuTAGI-parity core).
 - **Parity:** every kept example reproduces its cuTAGI counterpart at Phase-1
   tolerance; see [`PLAN.md`](PLAN.md) §3 for the table.
-- **Tests:** 95 unit + 77 validation pass on CUDA.
+- **Tests:** 95 unit + 89 validation pass on CUDA.
 - **Archive:** layers, optimizers, and diagnostics outside the minimal scope
   live under [`_archive/`](_archive/); nothing deleted.
 
 ### Recent milestones
 
+- **2026-04-23.** Per-call dispatch overhead in `kernels/attention.py` cut
+  17–24% by replacing `@triton.autotune` with a shape-adaptive `_pick_blocks`
+  heuristic; attention validation suite (18 tests) still passes. CIFAR-10
+  ResNet-18 + Remax reaches **89%** test accuracy after exact cuTAGI parity.
+- **2026-04-22.** Self-attention added (`Embedding`, `PositionalEncoding`,
+  `MultiheadAttentionV2`, `RMSNorm`) plus the `reverse_predictor` example —
+  sequence reversal with sinusoidal PE + MHA-V2 + RMSNorm + HRC head,
+  matching cuTAGI's `feat/attn-debug` branch.
 - **2026-04-20.** Remax reimplemented to match cuTAGI's MixtureReLU plus
   log-normal covariance path. CIFAR-10 ResNet-18 + Remax now trains to ≥80%
   test accuracy in ~15 epochs with `gain_w=gain_b=0.1` and σ_v ∈ {0.01, 0.05}.
@@ -78,6 +86,7 @@ python examples/cifar10_resnet18.py --n_epochs 100 --gain_w 0.1 --gain_b 0.1
 python examples/cifar10_resnet18_hrc.py
 python examples/regression.py
 python examples/regression_heteros.py
+python examples/reverse_predictor.py    # sinusoidal PE + MHA-V2 + RMSNorm + HRC head
 python examples/custom_layer.py         # tutorial: write your own Triton layer
 ```
 
@@ -102,6 +111,10 @@ reading it top-to-bottom in an evening is a goal, not an accident.
 | `Remax` | classification head (cuTAGI-native) |
 | `ResBlock` + `Add` | ResNet-18 |
 | `EvenSoftplus` | heteroscedastic regression noise head |
+| `Embedding` | reverse_predictor (token → vector) |
+| `PositionalEncoding` | reverse_predictor (sinusoidal, fixed) |
+| `MultiheadAttentionV2` | reverse_predictor (separate Q/K/V projections, Remax over scores) |
+| `RMSNorm` | reverse_predictor |
 
 ### Top-level
 
@@ -110,7 +123,10 @@ reading it top-to-bottom in an evening is a goal, not an accident.
 - `param_init.py`: He / Xavier / Gaussian init.
 - `hrc_softmax.py`: hierarchical softmax output for many-class classification.
 - `checkpoint.py`: `RunDir` (run-directory manager) and `load_model`.
-- `kernels/common.py`: fused Triton kernels.
+- `kernels/common.py`: fused Triton kernels for Linear / Conv2D / BN.
+- `kernels/attention.py`: fused Triton kernels for `MultiheadAttentionV2`
+  (`bmm_tagi_var` for the QKᵀ / Score@V variance, `bmm_shared_left/right`
+  for the four backward reductions).
 - `update/observation.py`, `update/parameters.py`: innovation and parameter update rules.
 
 ---
@@ -156,7 +172,7 @@ for an end-to-end ELU tutorial: Triton kernel, `Layer` subclass, MNIST run.
 
 ```bash
 pytest tests/unit                 # ~95 tests, fast
-pytest tests/validation           # ~77 tests; compares to pytagi reference
+pytest tests/validation           # ~89 tests; compares to pytagi reference
 pytest -m "not slow and not cuda" # CPU subset
 ```
 

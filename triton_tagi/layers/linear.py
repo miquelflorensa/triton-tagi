@@ -87,20 +87,20 @@ class Linear(LearnableLayer):
         μ_z = μ_a @ μ_w + μ_b
         S_z = μ_a² @ S_w  +  S_a @ (μ_w² + S_w)  +  S_b
 
-        Parameters
-        ----------
-        ma : Tensor (B, in_features)   input activation means
-        Sa : Tensor (B, in_features)   input activation variances
-
-        Returns
-        -------
-        mz : Tensor (B, out_features)  pre-activation means
-        Sz : Tensor (B, out_features)  pre-activation variances
+        Accepts any leading batch shape; the last dim must equal ``in_features``.
+        Shapes of (B, in) and (B, S, in) are both valid; output mirrors the
+        leading dims with ``out_features`` in the last position.
         """
-        self.ma_in = ma  # cache for backward
-        mz = torch.matmul(ma, self.mw) + self.mb
-        Sz = triton_fused_var_forward(ma, Sa, self.mw, self.Sw, self.Sb)
-        return mz, Sz
+        self._input_shape = ma.shape  # cache for backward reshape
+        ma_flat = ma.reshape(-1, self.in_features).contiguous()
+        Sa_flat = Sa.reshape(-1, self.in_features).contiguous()
+        self.ma_in = ma_flat
+
+        mz_flat = torch.matmul(ma_flat, self.mw) + self.mb
+        Sz_flat = triton_fused_var_forward(ma_flat, Sa_flat, self.mw, self.Sw, self.Sb)
+
+        out_shape = (*self._input_shape[:-1], self.out_features)
+        return mz_flat.reshape(out_shape), Sz_flat.reshape(out_shape)
 
     # ------------------------------------------------------------------
     #  Backward (compute deltas only — NO parameter update)
@@ -130,11 +130,15 @@ class Linear(LearnableLayer):
         delta_ma : Tensor (B, in_features)   mean delta to propagate
         delta_Sa : Tensor (B, in_features)   variance delta to propagate
         """
+        # Flatten any leading batch dims so the matmul / Triton kernels see 2D.
+        dmz_flat = delta_mz.reshape(-1, self.out_features).contiguous()
+        dSz_flat = delta_Sz.reshape(-1, self.out_features).contiguous()
+
         # ── Raw gradients (sum over batch) ──
-        grad_mw = torch.matmul(self.ma_in.T, delta_mz)
-        grad_mb = delta_mz.sum(0, keepdim=True)
-        grad_Sw = torch.matmul((self.ma_in**2).T, delta_Sz)
-        grad_Sb = delta_Sz.sum(0, keepdim=True)
+        grad_mw = torch.matmul(self.ma_in.T, dmz_flat)
+        grad_mb = dmz_flat.sum(0, keepdim=True)
+        grad_Sw = torch.matmul((self.ma_in**2).T, dSz_flat)
+        grad_Sb = dSz_flat.sum(0, keepdim=True)
 
         # ── Parameter deltas (cuTAGI convention) ──
         #   Δ_μ_w = S_w · grad_μ       (prior variance × gradient)
@@ -147,8 +151,9 @@ class Linear(LearnableLayer):
             self.delta_Sb = (self.Sb**2) * grad_Sb
 
         # ── Propagate deltas to previous layer ──
-        delta_ma, delta_Sa = triton_fused_backward_delta(delta_mz, delta_Sz, self.mw)
-        return delta_ma, delta_Sa
+        delta_ma_flat, delta_Sa_flat = triton_fused_backward_delta(dmz_flat, dSz_flat, self.mw)
+        in_shape = (*self._input_shape[:-1], self.in_features)
+        return delta_ma_flat.reshape(in_shape), delta_Sa_flat.reshape(in_shape)
 
     # ------------------------------------------------------------------
     #  Update (apply capped deltas — called by the network)

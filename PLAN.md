@@ -23,8 +23,8 @@ Goals, in priority order:
 4. **Fast** — fused Triton kernels; benchmarked against cuTAGI on the same
    hardware.
 
-**Non-goals (for now):** LSTM, self-attention, autograd-style computation
-graph, Adam/Nadam/momentum optimizers, FRN/TLU/SharedVar variants,
+**Non-goals (for now):** LSTM, autograd-style computation graph,
+Adam/Nadam/momentum optimizers, FRN/TLU/SharedVar variants,
 ConvTranspose2D, posterior-tempering / cold-posterior studies,
 multi-GPU/DDP. Code for the non-goals lives under `_archive/` and can be
 restored if ever needed.
@@ -48,6 +48,10 @@ restored if ever needed.
 | `Remax` | classification head (cuTAGI-native output activation) |
 | `ResBlock` + `Add` | ResNet-18 |
 | `EvenSoftplus` | heteroscedastic regression noise head |
+| `Embedding` | reverse_predictor |
+| `PositionalEncoding` | reverse_predictor (sinusoidal, fixed) |
+| `MultiheadAttentionV2` | reverse_predictor (V2, separate Q/K/V) |
+| `RMSNorm` | reverse_predictor |
 
 ### Top-level (`triton_tagi/`)
 
@@ -56,7 +60,14 @@ restored if ever needed.
 - `param_init.py` — He/Xavier/Gaussian init for Linear/Conv/Norm layers
 - `hrc_softmax.py` — hierarchical softmax output for many-class classification
 - `checkpoint.py` — `RunDir` (training-side I/O) and `load_model` (inference-side loader)
-- `kernels/common.py` — fused Triton kernels
+- `kernels/common.py` — fused Triton kernels for Linear / Conv2D / BN
+  (variance forward, backward delta, weight gradient)
+- `kernels/attention.py` — fused Triton kernels for `MultiheadAttentionV2`
+  (`bmm_tagi_var` for full-Gaussian QKᵀ / Score@V, `bmm_shared_left/right`
+  for the four backward reductions). Block sizes are picked by a
+  `_pick_blocks(M,L,K)` heuristic — `@triton.autotune` was removed because
+  its ~50-100µs/call dispatch overhead dominated at small attention shapes
+  (see `feedback_triton_autotune_overhead.md` in memory)
 - `update/observation.py`, `update/parameters.py` — innovation and update rules
 
 That's it. Everything else is archived.
@@ -80,6 +91,7 @@ documented tolerance, training curves qualitatively overlapping.
 | `cifar10_resnet18.py` | `resnet18_cifar10.py` | ☑ runs | ResNet-18, gain=0.1, σ_v=0.05 |
 | `cifar10_resnet18_hrc.py` | `softmax_cifar.py` | ☑ runs | ResNet-18 + hierarchical softmax head |
 | `custom_layer.py` | (new) | ☑ works | ELU tutorial: Triton kernel → `Layer` subclass → MNIST |
+| `reverse_predictor.py` | `reverse_predictor.py` (feat/attn-debug) | ☑ runs | Sinusoidal PE + MHA-V2 + RMSNorm + HRC head; sequence-to-sequence reversal |
 
 ### Example conventions
 
@@ -137,8 +149,12 @@ Full training runs (`test_mnist_mlp.py`, `test_cifar10_cnn.py`,
 ## 6. Benchmarks (`benchmarks/`)
 
 - `bench_vs_cutagi.py` — Linear / Conv2D / BN networks at batch {1, 16, 32, 64, 256, 1024}; median of 50 runs.
+- `bench_attention.py` — per-call `bmm_tagi_var` / `bmm_shared_*` vs torch
+  baseline (two `matmul` + elementwise), plus end-to-end MHA forward+backward.
+  Uses CUDA events for sub-100µs precision.
 - `profile_bottlenecks.py` — `torch.profiler` trace with hot-kernel breakdown.
 - `results.md` — current numbers (batch-1024: Linear 70×, Conv2D 9.7×, BN 8.7× vs cuTAGI).
+  No attention row yet; `bench_attention.py` reports inline.
 
 Benchmark code only exercises the minimal surface. No archived layers.
 
@@ -154,6 +170,9 @@ Nothing is deleted. Moved-out code lives under:
   `monitor.py`, `inference_init.py`, `init.py`),
   `update/shared_var_parameters.py`.
 - `_archive/tests/` — tests for the archived code.
+- `_archive/diagnostics/` — one-off `_diag_*.py` investigation scripts
+  moved out of `tests/validation/` on 2026-04-23 (Remax/MMCDF/ResNet-18
+  parity debugging; the bugs they chased are all fixed).
 - `_archive/workspace/` — old training scripts, `run_logs_*` directories,
   top-level figures/JSONs, `tagi_monitor/`, `figures/`.
 
@@ -164,7 +183,14 @@ in `__init__.py`.
 
 ## 8. Scope Changes
 
-This plan was last rewritten on **2026-04-19** to reflect the decision to
+Last touched **2026-04-23**: documented `kernels/attention.py` and
+`bench_attention.py`; archived `_diag_*.py` investigation scripts to
+`_archive/diagnostics/`; bumped version to 0.2.0; recorded the
+`@triton.autotune` dispatch-overhead finding.
+
+The plan was last *rewritten* on **2026-04-22** to add self-attention
+(Embedding, PositionalEncoding, MultiheadAttentionV2, RMSNorm) and the
+`reverse_predictor` example. The previous rewrite was on **2026-04-19** to
 pare the library back to a minimal cuTAGI-parity core. Prior plans (pre-2026-04-19)
 included Phase 5+ autograd, Phase 5.5 cold-posterior / BatchNorm audit, and
 ImageNet / time-series / autoencoder examples. Those sections were removed.
