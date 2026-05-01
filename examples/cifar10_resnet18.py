@@ -144,6 +144,7 @@ def train(
     print("  " + "─" * 26)
 
     best_acc = 0.0
+    step_fn = net.step_precision if config.get("update_rule") == "precision" else net.step
 
     for epoch in range(1, n_epochs + 1):
         t0 = time.perf_counter()
@@ -154,7 +155,7 @@ def train(
             xb = x_s[i : i + batch_size]
             if augment:
                 xb = gpu_augment(xb)
-            net.step(xb, y_s[i : i + batch_size], sigma_v)
+            step_fn(xb, y_s[i : i + batch_size], sigma_v)
 
         if device.type == "cuda":
             torch.cuda.synchronize()
@@ -216,6 +217,7 @@ def main(
     gain_w: float = 0.1,
     gain_b: float = 0.1,
     augment: bool = True,
+    update_rule: str = "capped",
     data_dir: str = "data",
     checkpoint_interval: int = 10,
     seed: int = 42,
@@ -247,7 +249,8 @@ def main(
     config: dict = {
         "dataset": "cifar10",
         "arch": "resnet18",
-        "optimizer": "tagi",
+        "optimizer": f"tagi_{update_rule}",
+        "update_rule": update_rule,
         "n_epochs": n_epochs,
         "batch_size": batch_size,
         "sigma_v": sigma_v,
@@ -261,7 +264,7 @@ def main(
     }
 
     # ── RunDir ──
-    run = RunDir("cifar10", "resnet18", "tagi")
+    run = RunDir("cifar10", "resnet18", config["optimizer"])
     run.save_config(config)
     print(f"  Run directory: {run.path}")
 
@@ -296,7 +299,10 @@ def main(
     )
     print(f"\n{net}")
     print(f"  Parameters: {net.num_parameters():,}")
-    print(f"\n  Epochs: {n_epochs}  |  Batch: {batch_size}  |  σ_v: {sigma_v}  |  augment: {augment}")
+    print(
+        f"\n  Epochs: {n_epochs}  |  Batch: {batch_size}  |  σ_v: {sigma_v}"
+        f"  |  update: {update_rule}  |  augment: {augment}"
+    )
 
     # ── Train ──
     best_acc = train(
@@ -319,6 +325,12 @@ if __name__ == "__main__":
     parser.add_argument("--sigma_v", type=float, default=0.05)
     parser.add_argument("--gain_w", type=float, default=0.1)
     parser.add_argument("--gain_b", type=float, default=0.1)
+    parser.add_argument(
+        "--update_rule",
+        choices=("capped", "precision"),
+        default="capped",
+        help="Parameter update rule: capped cuTAGI default or precision-space batch update",
+    )
     parser.add_argument("--no_augment", dest="augment", action="store_false",
                         help="Disable GPU augmentation")
     parser.add_argument("--data_dir", type=str, default="data")

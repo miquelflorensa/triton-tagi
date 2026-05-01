@@ -1,0 +1,648 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{bm}
+\usepackage{hyperref}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{assumption}{Assumption}
+\newtheorem{remark}{Remark}
+
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\cov}{\operatorname{cov}}
+\newcommand{\var}{\operatorname{var}}
+\newcommand{\E}{\mathbb{E}}
+
+\title{Precision-Space Mini-Batch Updates for TAGI}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\paragraph{Motivation}
+In standard Tractable Approximate Gaussian Inference (TAGI)
+\cite{goulet2021tractable}, the observation model is
+\begin{equation}
+    \bm{y} = \bm{z}^{(\mathtt{O})} + \bm{v},
+    \qquad
+    \bm{V} \sim \mathcal{N}(\bm{0},\bm{\Sigma}_{\bm{V}}).
+    \label{eq:obs-model}
+\end{equation}
+The forward pass gives
+\begin{equation}
+    \bm{\mu}_{\bm{Y}} = \bm{\mu}_{\bm{Z}^{(\mathtt{O})}},
+    \qquad
+    \bm{\Sigma}_{\bm{Y}}
+    =
+    \bm{\Sigma}_{\bm{Z}^{(\mathtt{O})}} + \bm{\Sigma}_{\bm{V}}.
+    \label{eq:predictive-y}
+\end{equation}
+For diagonal output covariance, the innovation quantities used in the
+implementation can be written element-wise as
+\begin{equation}
+    \delta_{\mu,i}
+    =
+    \frac{y_i-\mu_{Y_i}}{\sigma^2_{Y_i}},
+    \qquad
+    \delta_{\sigma,i}
+    =
+    -\frac{1}{\sigma^2_{Y_i}},
+    \label{eq:output-innovation}
+\end{equation}
+where
+\(
+\sigma^2_{Y_i}
+=
+\sigma^2_{Z^{(\mathtt{O})}_i}+\sigma^2_{V_i}.
+\)
+These quantities are propagated backward through the network using the
+layer-wise RTS equations. For a scalar parameter
+\(
+\theta_p^{(j)}
+\)
+with prior
+\(
+\theta_p^{(j)} \sim
+\mathcal{N}(\mu_{\theta_p},\sigma^2_{\theta_p})
+\),
+the usual additive TAGI update can be written as
+\begin{equation}
+    \mu_{\theta_p|\bm{y}}
+    =
+    \mu_{\theta_p}
+    +
+    \Delta \mu_{\theta_p}^{\mathrm{add}},
+    \qquad
+    \sigma^2_{\theta_p|\bm{y}}
+    =
+    \sigma^2_{\theta_p}
+    +
+    \Delta \sigma_{\theta_p}^{2,\mathrm{add}}.
+    \label{eq:additive-tagi-update}
+\end{equation}
+Under the diagonal covariance approximation, the accumulated increments have
+the local form
+\begin{equation}
+    \Delta \mu_{\theta_p}^{\mathrm{add}}
+    =
+    \sigma^2_{\theta_p}\eta_{\theta_p},
+    \qquad
+    \Delta \sigma_{\theta_p}^{2,\mathrm{add}}
+    =
+    -\sigma^4_{\theta_p}\Lambda_{\theta_p},
+    \label{eq:additive-natural-form}
+\end{equation}
+where
+\(
+\eta_{\theta_p}
+\)
+is a first-order information vector contribution and
+\(
+\Lambda_{\theta_p}\geq 0
+\)
+is a scalar precision contribution. For a mini-batch, TAGI implementations
+usually obtain
+\(
+\eta_{\theta_p}
+\)
+and
+\(
+\Lambda_{\theta_p}
+\)
+by summing contributions over the examples in the batch while keeping the
+prior moments fixed during the backward pass.
+
+\paragraph{The Mini-Batch Difficulty}
+For a single observation, the additive variance formula in
+\eqref{eq:additive-natural-form} is the first-order Gaussian conditioning
+update used by TAGI. For a mini-batch, however, all examples are processed
+with the same frozen prior variance
+\(
+\sigma^2_{\theta_p}
+\).
+If the summed information
+\(
+\sigma^2_{\theta_p}\Lambda_{\theta_p}
+\)
+is large, the additive update
+\[
+    \sigma^2_{\theta_p}
+    -
+    \sigma^4_{\theta_p}\Lambda_{\theta_p}
+\]
+can become too small or even non-positive. In practice this motivates
+heuristics such as a cap factor, which limits the magnitude of the parameter
+increments. The purpose of the precision-space update is to replace this cap
+with the exact form of the local Gaussian batch posterior.
+
+\paragraph{Local Linear-Gaussian Batch Model}
+Consider one scalar parameter
+\(
+\theta_p
+\equiv \theta_p^{(j)}
+\)
+inside the network and assume that, conditionally on all other random
+variables being represented by their current Gaussian moments, each scalar
+observation in a mini-batch admits the local model
+\begin{equation}
+    y_{b,i}
+    =
+    \mu_{Y_{b,i}}
+    +
+    h_{b,i,p}(\theta_p-\mu_{\theta_p})
+    +
+    \varepsilon_{b,i},
+    \qquad
+    \varepsilon_{b,i}
+    \sim
+    \mathcal{N}(0,r_{b,i}),
+    \label{eq:local-linear-model}
+\end{equation}
+where
+\(
+b\in\mathcal{B}
+\)
+indexes the mini-batch and
+\(
+i
+\)
+indexes the output dimension or selected observation node. The quantity
+\(
+h_{b,i,p}
+\)
+is the local sensitivity of the predictive mean with respect to
+\(
+\theta_p
+\),
+and
+\(
+r_{b,i}
+\)
+is the local likelihood variance assigned to that observation. In the usual
+TAGI diagonal implementation this role is played by the predictive scalar
+variance
+\(
+\sigma^2_{Y_{b,i}}
+\)
+from \eqref{eq:predictive-y}. Define
+\begin{equation}
+    e_{b,i}
+    =
+    y_{b,i}-\mu_{Y_{b,i}},
+    \qquad
+    \eta_{\theta_p}
+    =
+    \sum_{b\in\mathcal{B}}\sum_i
+    \frac{h_{b,i,p}e_{b,i}}{r_{b,i}},
+    \qquad
+    \Lambda_{\theta_p}
+    =
+    \sum_{b\in\mathcal{B}}\sum_i
+    \frac{h_{b,i,p}^2}{r_{b,i}}.
+    \label{eq:eta-lambda}
+\end{equation}
+
+\begin{proposition}[Exact local batch posterior]
+Under the local model \eqref{eq:local-linear-model} and the scalar Gaussian
+prior
+\(
+\theta_p\sim
+\mathcal{N}(\mu_{\theta_p},\sigma^2_{\theta_p})
+\),
+the posterior marginal for
+\(
+\theta_p
+\)
+is Gaussian with
+\begin{equation}
+    \sigma^2_{\theta_p|\mathcal{B}}
+    =
+    \frac{\sigma^2_{\theta_p}}
+    {1+\sigma^2_{\theta_p}\Lambda_{\theta_p}},
+    \qquad
+    \mu_{\theta_p|\mathcal{B}}
+    =
+    \mu_{\theta_p}
+    +
+    \frac{\sigma^2_{\theta_p}\eta_{\theta_p}}
+    {1+\sigma^2_{\theta_p}\Lambda_{\theta_p}}.
+    \label{eq:exact-local-posterior}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+Let
+\(
+\tilde{\theta}_p=\theta_p-\mu_{\theta_p}
+\).
+The log posterior is, up to an additive constant,
+\begin{align}
+    \log p(\theta_p|\mathcal{B})
+    &=
+    -\frac{1}{2}
+    \frac{\tilde{\theta}_p^2}{\sigma^2_{\theta_p}}
+    -
+    \frac{1}{2}
+    \sum_{b\in\mathcal{B}}\sum_i
+    \frac{(e_{b,i}-h_{b,i,p}\tilde{\theta}_p)^2}{r_{b,i}}  \nonumber \\
+    &=
+    -\frac{1}{2}
+    \left(
+    \frac{1}{\sigma^2_{\theta_p}}
+    +
+    \Lambda_{\theta_p}
+    \right)
+    \tilde{\theta}_p^2
+    +
+    \eta_{\theta_p}\tilde{\theta}_p
+    + \mathrm{const}.
+    \label{eq:posterior-complete-square}
+\end{align}
+Completing the square gives posterior precision
+\(
+(\sigma^2_{\theta_p})^{-1}+\Lambda_{\theta_p}
+\)
+and posterior mean displacement
+\(
+\eta_{\theta_p}/((\sigma^2_{\theta_p})^{-1}+\Lambda_{\theta_p})
+\),
+which is exactly \eqref{eq:exact-local-posterior}.
+\end{proof}
+
+\paragraph{Precision-Space TAGI Update}
+Equation \eqref{eq:exact-local-posterior} suggests replacing the capped
+additive mini-batch update with
+\begin{equation}
+    d_{\theta_p}
+    =
+    1+\sigma^2_{\theta_p}\Lambda_{\theta_p}.
+    \label{eq:precision-denom}
+\end{equation}
+Using the TAGI additive increments in \eqref{eq:additive-natural-form}, this
+can be written without explicitly forming
+\(
+\eta_{\theta_p}
+\)
+or
+\(
+\Lambda_{\theta_p}
+\):
+\begin{equation}
+    d_{\theta_p}
+    =
+    1
+    -
+    \frac{
+    \Delta \sigma_{\theta_p}^{2,\mathrm{add}}
+    }{
+    \sigma^2_{\theta_p}
+    }.
+    \label{eq:denom-from-delta}
+\end{equation}
+The proposed mini-batch update is therefore
+\begin{equation}
+\boxed{
+\begin{aligned}
+    \mu_{\theta_p|\mathcal{B}}
+    &=
+    \mu_{\theta_p}
+    +
+    \frac{
+    \Delta \mu_{\theta_p}^{\mathrm{add}}
+    }{
+    d_{\theta_p}
+    },
+    \\
+    \sigma^2_{\theta_p|\mathcal{B}}
+    &=
+    \frac{
+    \sigma^2_{\theta_p}
+    }{
+    d_{\theta_p}
+    },
+    \qquad
+    d_{\theta_p}
+    =
+    1
+    -
+    \frac{
+    \Delta \sigma_{\theta_p}^{2,\mathrm{add}}
+    }{
+    \sigma^2_{\theta_p}
+    }.
+\end{aligned}}
+\label{eq:precision-tagi-update}
+\end{equation}
+This is the precision-space analogue of the usual TAGI parameter update. It
+uses the same forward pass, the same observation innovation
+\eqref{eq:output-innovation}, and the same RTS backward pass. Only the final
+assimilation of the accumulated parameter increments is changed.
+
+\paragraph{Optional Tempered Form}
+If one wants to explicitly temper the amount of mini-batch information, one
+may introduce a scalar
+\(
+\rho\in(0,1]
+\)
+and use
+\begin{equation}
+\begin{aligned}
+    d_{\theta_p}(\rho)
+    &=
+    1
+    -
+    \rho
+    \frac{
+    \Delta \sigma_{\theta_p}^{2,\mathrm{add}}
+    }{
+    \sigma^2_{\theta_p}
+    },
+    \\
+    \mu_{\theta_p|\mathcal{B}}
+    &=
+    \mu_{\theta_p}
+    +
+    \rho
+    \frac{
+    \Delta \mu_{\theta_p}^{\mathrm{add}}
+    }{
+    d_{\theta_p}(\rho)
+    },
+    \\
+    \sigma^2_{\theta_p|\mathcal{B}}
+    &=
+    \frac{\sigma^2_{\theta_p}}{d_{\theta_p}(\rho)}.
+\end{aligned}
+\label{eq:tempered-precision-update}
+\end{equation}
+The default choice is
+\(
+\rho=1
+\),
+which introduces no additional hyperparameter and corresponds to full local
+Bayesian assimilation of the mini-batch. Values
+\(
+\rho<1
+\)
+can be interpreted as fractional likelihood or power posterior updates, but
+they are not required by the proposed method.
+
+\paragraph{Consistency With Standard TAGI}
+\begin{proposition}[First-order agreement]
+For small local information
+\(
+\sigma^2_{\theta_p}\Lambda_{\theta_p}\ll 1
+\),
+the precision-space update \eqref{eq:precision-tagi-update} agrees with the
+standard additive TAGI update to first order.
+\end{proposition}
+
+\begin{proof}
+Using
+\(
+(1+x)^{-1}=1-x+\mathcal{O}(x^2)
+\)
+with
+\(
+x=\sigma^2_{\theta_p}\Lambda_{\theta_p}
+\),
+\begin{align}
+    \sigma^2_{\theta_p|\mathcal{B}}
+    &=
+    \frac{\sigma^2_{\theta_p}}{1+x}
+     =
+    \sigma^2_{\theta_p}
+    -
+    \sigma^4_{\theta_p}\Lambda_{\theta_p}
+    +
+    \mathcal{O}(x^2),
+    \\
+    \mu_{\theta_p|\mathcal{B}}
+    &=
+    \mu_{\theta_p}
+    +
+    \frac{\sigma^2_{\theta_p}\eta_{\theta_p}}{1+x}
+     =
+    \mu_{\theta_p}
+    +
+    \sigma^2_{\theta_p}\eta_{\theta_p}
+    +
+    \mathcal{O}(x\,\sigma^2_{\theta_p}\eta_{\theta_p}).
+\end{align}
+The leading terms are exactly the additive TAGI increments in
+\eqref{eq:additive-natural-form}.
+\end{proof}
+
+\paragraph{Positivity and Stability}
+\begin{proposition}[Positive variance]
+If
+\(
+\sigma^2_{\theta_p}>0
+\)
+and
+\(
+\Lambda_{\theta_p}\geq 0
+\),
+then the precision-space update satisfies
+\begin{equation}
+    0
+    <
+    \sigma^2_{\theta_p|\mathcal{B}}
+    \leq
+    \sigma^2_{\theta_p}.
+    \label{eq:positive-monotone-var}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+Since
+\(
+\Lambda_{\theta_p}\geq 0
+\),
+the denominator
+\(
+1+\sigma^2_{\theta_p}\Lambda_{\theta_p}
+\)
+is at least one. Dividing the positive prior variance by this denominator
+gives a positive posterior variance that cannot exceed the prior variance.
+\end{proof}
+
+This property is the central practical advantage over the additive mini-batch
+variance update. The additive update can become non-positive when
+\(
+\sigma^2_{\theta_p}\Lambda_{\theta_p}>1
+\).
+The precision update remains positive for any finite non-negative
+\(
+\Lambda_{\theta_p}
+\).
+Moreover, the mean update is automatically damped by the same denominator
+that increases posterior precision:
+\begin{equation}
+    \Delta \mu_{\theta_p}^{\mathrm{prec}}
+    =
+    \frac{
+    \sigma^2_{\theta_p}\eta_{\theta_p}
+    }{
+    1+\sigma^2_{\theta_p}\Lambda_{\theta_p}
+    }.
+    \label{eq:self-normalized-mean}
+\end{equation}
+Thus, when the mini-batch contains a large amount of information about a
+parameter, the method reduces both its variance and its mean displacement in
+a coupled Bayesian way rather than clipping the two quantities independently.
+
+\paragraph{Relation to the Cap Factor}
+The capped TAGI update can be written schematically as
+\begin{equation}
+\begin{aligned}
+    \mu_{\theta_p}^{+}
+    &=
+    \mu_{\theta_p}
+    +
+    \operatorname{sign}(\Delta\mu_{\theta_p}^{\mathrm{add}})
+    \min\left(
+    |\Delta\mu_{\theta_p}^{\mathrm{add}}|,
+    \frac{\sigma_{\theta_p}}{c_B}
+    \right),
+    \\
+    (\sigma^2_{\theta_p})^{+}
+    &=
+    \sigma^2_{\theta_p}
+    +
+    \operatorname{sign}(\Delta\sigma_{\theta_p}^{2,\mathrm{add}})
+    \min\left(
+    |\Delta\sigma_{\theta_p}^{2,\mathrm{add}}|,
+    \frac{\sigma_{\theta_p}}{c_B}
+    \right),
+\end{aligned}
+\label{eq:capped-update}
+\end{equation}
+where
+\(
+c_B
+\)
+is a batch-size-dependent cap factor. This stabilizes training, but it is not
+the posterior of a Gaussian conditioning problem. In contrast,
+\eqref{eq:precision-tagi-update} is the exact posterior of the local
+linear-Gaussian batch model in Proposition 1. The cap factor is therefore
+replaced by the posterior precision denominator
+\(
+d_{\theta_p}
+\),
+which is determined by the inferred information
+\(
+\Lambda_{\theta_p}
+\)
+rather than by a manually selected batch-size table.
+
+\paragraph{Correctness Statement}
+The proposed method is correct in the following precise sense. Under the same
+diagonal covariance and local moment-matching assumptions used by TAGI, and
+under the additional local linear-Gaussian model
+\eqref{eq:local-linear-model} for each scalar parameter marginal, the update
+\eqref{eq:precision-tagi-update} is the exact Gaussian posterior marginal for
+that scalar parameter after assimilating the mini-batch. When the local
+information is small, it reduces to the standard additive TAGI update to first
+order. For arbitrary finite mini-batch information, it preserves positivity of
+all parameter variances by construction.
+
+\paragraph{Viability in Deep Networks}
+The update is viable for deep TAGI networks for the same reasons that the
+standard layer-wise TAGI update is viable:
+\begin{enumerate}
+    \item The forward pass still uses the Gaussian Multiplicative
+    Approximation and analytic activation moment propagation.
+    \item The backward pass still uses the RTS layer-wise conditional update
+    and the diagonal covariance approximation.
+    \item The computational cost remains linear in the number of learnable
+    scalar parameters because \eqref{eq:precision-tagi-update} is element-wise.
+    \item The variance update cannot become negative, so no variance collapse
+    through additive over-subtraction is possible.
+    \item The mean update is self-normalized by the inferred batch precision,
+    reducing the need for an external cap factor.
+\end{enumerate}
+The main approximation is that the sensitivities
+\(
+h_{b,i,p}
+\)
+and predictive variances
+\(
+r_{b,i}
+\)
+are held fixed while the whole mini-batch is assimilated. This is the same
+frozen-prior approximation already present in mini-batch TAGI. The
+precision-space update improves this approximation by using the batch
+posterior precision implied by the frozen local model, rather than applying a
+first-order variance update outside its stable regime.
+
+\paragraph{Role of the Observation Noise}
+The observation covariance
+\(
+\bm{\Sigma}_{\bm{V}}
+\)
+remains part of the likelihood through
+\(
+\bm{\Sigma}_{\bm{Y}}
+\)
+in \eqref{eq:predictive-y}. A smaller
+\(
+\bm{\Sigma}_{\bm{V}}
+\)
+increases both the innovation magnitude and the inferred precision
+\(
+\Lambda_{\theta_p}
+\);
+a larger
+\(
+\bm{\Sigma}_{\bm{V}}
+\)
+decreases both. The precision-space update therefore does not remove the need
+for a meaningful observation model. Instead, it separates two roles that are
+often conflated in practice:
+\begin{equation}
+    \bm{\Sigma}_{\bm{V}}
+    \quad\text{controls likelihood noise,}
+    \qquad
+    d_{\theta_p}
+    \quad\text{controls Bayesian batch assimilation.}
+\end{equation}
+This separation is desirable: the observation noise should represent
+aleatory uncertainty or model mismatch, whereas the amount of parameter
+movement should follow from posterior precision.
+
+\paragraph{Summary}
+The precision-space mini-batch TAGI update is
+\[
+    \mu_{\theta_p|\mathcal{B}}
+    =
+    \mu_{\theta_p}
+    +
+    \frac{
+    \Delta \mu_{\theta_p}^{\mathrm{add}}
+    }{
+    1
+    -
+    \Delta \sigma_{\theta_p}^{2,\mathrm{add}}/
+    \sigma^2_{\theta_p}
+    },
+    \qquad
+    \sigma^2_{\theta_p|\mathcal{B}}
+    =
+    \frac{
+    \sigma^2_{\theta_p}
+    }{
+    1
+    -
+    \Delta \sigma_{\theta_p}^{2,\mathrm{add}}/
+    \sigma^2_{\theta_p}
+    }.
+\]
+It is exact for the local linear-Gaussian batch approximation, first-order
+consistent with standard TAGI, positive by construction, and computationally
+linear in the number of parameters. It replaces the cap factor by a Bayesian
+precision denominator determined by the mini-batch information itself.
+
+\end{document}

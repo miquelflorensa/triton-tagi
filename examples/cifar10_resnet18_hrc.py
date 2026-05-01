@@ -148,6 +148,7 @@ def train(
     best_acc = 0.0
     anneal_rate = config.get("anneal_rate", 1.0)
     sigma_v_min = config.get("sigma_v_min", sigma_v)
+    step_fn = net.step_hrc_precision if config.get("update_rule") == "precision" else net.step_hrc
 
     for epoch in range(1, n_epochs + 1):
         current_sv = max(sigma_v * (anneal_rate ** epoch), sigma_v_min)
@@ -161,7 +162,7 @@ def train(
             xb = x_s[i : i + batch_size]
             if augment:
                 xb = gpu_augment(xb)
-            net.step_hrc(xb, y_s[i : i + batch_size], hrc, current_sv)
+            step_fn(xb, y_s[i : i + batch_size], hrc, current_sv)
 
         if device.type == "cuda":
             torch.cuda.synchronize()
@@ -225,6 +226,7 @@ def main(
     gain_w: float = 0.1,
     gain_b: float = 0.1,
     augment: bool = True,
+    update_rule: str = "capped",
     data_dir: str = "data",
     checkpoint_interval: int = 10,
     seed: int = 42,
@@ -266,7 +268,8 @@ def main(
     config: dict = {
         "dataset": "cifar10",
         "arch": "resnet18_hrc",
-        "optimizer": "tagi",
+        "optimizer": f"tagi_{update_rule}",
+        "update_rule": update_rule,
         "n_epochs": n_epochs,
         "batch_size": batch_size,
         "sigma_v": sigma_v,
@@ -284,7 +287,7 @@ def main(
     }
 
     # ── RunDir ──
-    run = RunDir("cifar10", "resnet18_hrc", "tagi")
+    run = RunDir("cifar10", "resnet18_hrc", config["optimizer"])
     run.save_config(config)
     print(f"  Run directory: {run.path}")
 
@@ -323,7 +326,10 @@ def main(
         if anneal_rate < 1.0
         else f"  |  σ_v: {sigma_v} (fixed)"
     )
-    print(f"\n  Epochs: {n_epochs}  |  Batch: {batch_size}{sv_str}  |  augment: {augment}")
+    print(
+        f"\n  Epochs: {n_epochs}  |  Batch: {batch_size}{sv_str}"
+        f"  |  update: {update_rule}  |  augment: {augment}"
+    )
 
     # ── Train ──
     best_acc = train(
@@ -350,6 +356,12 @@ if __name__ == "__main__":
                         help="Floor for sigma_v decay (defaults to --sigma_v)")
     parser.add_argument("--gain_w", type=float, default=0.1)
     parser.add_argument("--gain_b", type=float, default=0.1)
+    parser.add_argument(
+        "--update_rule",
+        choices=("capped", "precision"),
+        default="capped",
+        help="Parameter update rule: capped cuTAGI default or precision-space batch update",
+    )
     parser.add_argument("--no_augment", dest="augment", action="store_false",
                         help="Disable GPU augmentation")
     parser.add_argument("--data_dir", type=str, default="data")

@@ -34,7 +34,7 @@ from .base import Layer, LearnableLayer
 from .layers.multihead_attention import MultiheadAttentionV2
 from .layers.resblock import ResBlock
 from .update.observation import compute_innovation, compute_innovation_with_indices
-from .update.parameters import get_cap_factor
+from .update.parameters import get_cap_factor, update_parameters_precision
 
 
 class Sequential:
@@ -151,6 +151,38 @@ class Sequential:
 
         return y_pred_mu, y_pred_var
 
+    def step_precision(
+        self,
+        x_batch: Tensor,
+        y_batch: Tensor,
+        sigma_v: float,
+        info_scale: float = 1.0,
+    ) -> tuple[Tensor, Tensor]:
+        """
+        Perform one TAGI step using precision-space mini-batch assimilation.
+
+        This is an experimental alternative to the cuTAGI capped additive
+        update in :meth:`step`.  It keeps the same forward pass, observation
+        innovation, and backward delta propagation, then applies
+
+            S_new = S / (1 - info_scale * delta_S / S)
+            m_new = m + info_scale * delta_m / (1 - info_scale * delta_S / S)
+
+        to every learnable parameter.  The default ``info_scale=1`` absorbs
+        the full mini-batch information and uses no cap factor.
+        """
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+        delta_mu, delta_var = compute_innovation(y_batch, y_pred_mu, y_pred_var, sigma_v)
+
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+
+        for layer in self.layers:
+            if isinstance(layer, LearnableLayer):
+                self._update_precision_layer(layer, info_scale)
+
+        return y_pred_mu, y_pred_var
+
     # ------------------------------------------------------------------
     #  Hierarchical softmax training step
     # ------------------------------------------------------------------
@@ -222,6 +254,68 @@ class Sequential:
                 layer.update(cap_factor)
 
         return y_pred_mu, y_pred_var
+
+    def step_hrc_precision(
+        self,
+        x_batch: Tensor,
+        labels: Tensor,
+        hrc: "HierarchicalSoftmax",
+        sigma_v: float,
+        info_scale: float = 1.0,
+    ) -> tuple[Tensor, Tensor]:
+        """HRC variant of :meth:`step_precision`."""
+        from .hrc_softmax import labels_to_hrc
+
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+        pred_shape = y_pred_mu.shape
+        if y_pred_mu.dim() == 3:
+            ma_flat = y_pred_mu.reshape(-1, pred_shape[-1])
+            Sa_flat = y_pred_var.reshape(-1, pred_shape[-1])
+        else:
+            ma_flat = y_pred_mu
+            Sa_flat = y_pred_var
+
+        y_obs, y_idx = labels_to_hrc(labels, hrc)
+        var_obs = torch.full_like(y_obs, sigma_v**2)
+        delta_mu, delta_var = compute_innovation_with_indices(
+            ma_flat, Sa_flat, y_obs, var_obs, y_idx
+        )
+
+        if y_pred_mu.dim() == 3:
+            delta_mu = delta_mu.reshape(pred_shape)
+            delta_var = delta_var.reshape(pred_shape)
+
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+
+        for layer in self.layers:
+            if isinstance(layer, LearnableLayer):
+                self._update_precision_layer(layer, info_scale)
+
+        return y_pred_mu, y_pred_var
+
+    def _update_precision_layer(self, layer: LearnableLayer, info_scale: float) -> None:
+        """Apply the precision-space update to a layer or composite layer."""
+        if isinstance(layer, ResBlock):
+            for sub in layer._learnable:
+                self._update_precision_layer(sub, info_scale)
+            return
+
+        if isinstance(layer, MultiheadAttentionV2):
+            self._update_precision_layer(layer.q_proj, info_scale)
+            self._update_precision_layer(layer.k_proj, info_scale)
+            self._update_precision_layer(layer.v_proj, info_scale)
+            return
+
+        update_parameters_precision(layer.mw, layer.Sw, layer.delta_mw, layer.delta_Sw, info_scale)
+        if getattr(layer, "has_bias", False):
+            update_parameters_precision(
+                layer.mb,
+                layer.Sb,
+                layer.delta_mb,
+                layer.delta_Sb,
+                info_scale,
+            )
 
     # ------------------------------------------------------------------
     #  Utilities

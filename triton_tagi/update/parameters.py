@@ -126,3 +126,88 @@ def update_parameters(m, S, delta_m, delta_S, cap_factor):
         n,
         BLOCK=BLOCK,
     )
+
+
+# ======================================================================
+#  Triton kernel — precision-space batch update
+# ======================================================================
+
+
+@triton.jit
+def _precision_param_update_kernel(
+    m_ptr,
+    S_ptr,
+    dm_ptr,
+    dS_ptr,
+    info_scale,
+    variance_floor,
+    n_elements,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    valid = offs < n_elements
+
+    m = tl.load(m_ptr + offs, mask=valid)
+    S = tl.load(S_ptr + offs, mask=valid)
+    dm = tl.load(dm_ptr + offs, mask=valid)
+    dS = tl.load(dS_ptr + offs, mask=valid)
+
+    S_safe = tl.maximum(S, variance_floor)
+
+    # Stored TAGI deltas are additive:
+    #   dm = S * eta
+    #   dS = -S^2 * Lambda
+    # Precision assimilation gives:
+    #   denom = 1 + rho * S * Lambda = 1 - rho * dS / S
+    # Clamp positive dS to zero information; variance information should not
+    # reduce precision in the standard Gaussian observation path.
+    precision_step = tl.maximum(-dS / S_safe, 0.0)
+    denom = 1.0 + info_scale * precision_step
+
+    m_new = m + info_scale * dm / denom
+    S_new = S_safe / denom
+    S_new = tl.maximum(S_new, variance_floor)
+
+    tl.store(m_ptr + offs, m_new, mask=valid)
+    tl.store(S_ptr + offs, S_new, mask=valid)
+
+
+def update_parameters_precision(
+    m,
+    S,
+    delta_m,
+    delta_S,
+    info_scale: float = 1.0,
+    variance_floor: float = 1e-10,
+):
+    """
+    In-place precision-space TAGI batch update.
+
+    This treats the accumulated mini-batch deltas as natural-parameter
+    information instead of applying the additive variance approximation and
+    then capping it.  Given the stored deltas
+
+        delta_m = S * eta
+        delta_S = -S^2 * Lambda
+
+    the update is
+
+        denom = 1 + rho * S * Lambda
+        m_new = m + rho * delta_m / denom
+        S_new = S / denom
+
+    with ``rho = info_scale``.  The default ``rho=1`` absorbs the full
+    mini-batch information and introduces no cap-factor hyperparameter.
+    """
+    n = m.numel()
+    _precision_param_update_kernel[(triton.cdiv(n, BLOCK),)](
+        m.view(-1),
+        S.view(-1),
+        delta_m.view(-1),
+        delta_S.view(-1),
+        info_scale,
+        variance_floor,
+        n,
+        BLOCK=BLOCK,
+    )
