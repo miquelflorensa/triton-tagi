@@ -1,0 +1,615 @@
+\documentclass{uai2026} % for initial submission
+% \documentclass[accepted]{uai2026} % after acceptance, for a revised version;  
+% also before submission to see how the non-anonymous paper would look like 
+                        
+%% There is a class option to choose the math font
+% \documentclass[mathfont=ptmx]{uai2026} % ptmx math instead of Computer
+                                         % Modern (has noticeable issues)
+% \documentclass[mathfont=newtx]{uai2026} % newtx fonts (improves upon
+                                          % ptmx; less tested, no support)
+% NOTE: Only keep *one* line above as appropriate, as it will be replaced
+%       automatically for papers to be published. Do not make any other
+%       change above this note for an accepted version.
+
+%% Choose your variant of English; be consistent
+\usepackage[american]{babel}
+% \usepackage[british]{babel}
+
+%% Some suggested packages, as needed:
+\usepackage{natbib} % has a nice set of citation styles and commands
+    \bibliographystyle{plainnat}
+    \renewcommand{\bibsection}{\subsubsection*{References}}
+\usepackage{mathtools} % amsmath with fixes and additions
+% \usepackage{siunitx} % for proper typesetting of numbers and units
+\usepackage{booktabs} % commands to create good-looking tables
+\usepackage{tikz} % nice language for creating drawings and diagrams
+\usepackage{bm}
+\usepackage{float}
+\usepackage{amsmath} % For 'align' and 'split'
+\usepackage{amssymb} % For '\mathbb'
+
+%% Provided macros
+% \smaller: Because the class footnote size is essentially LaTeX's \small,
+%           redefining \footnotesize, we provide the original \footnotesize
+%           using this macro.
+%           (Use only sparingly, e.g., in drawings, as it is quite small.)
+
+%% Self-defined macros
+\newcommand{\swap}[3][-]{#3#1#2} % just an example
+
+\title{Analytically Tractable Real-to-Categorical Transformations \\ for Bayesian Neural Networks}
+
+% The standard author block has changed for UAI 2026 to provide
+% more space for long author lists and allow for complex affiliations
+%
+% All author information is authomatically removed by the class for the
+% anonymous submission version of your paper, so you can already add your
+% information below.
+%
+% Add authors
+\author[1]{\href{mailto:<miquel.florensa-montilla@polymtl.ca>?Subject=Your UAI 2026 paper}{Miquel Florensa-Montilla}{}}
+\author[1]{Luong-Ha Nguyen}
+\author[1]{James-A. Goulet}
+\author[1]{Guillaume-Alexandre Bilodeau}
+
+
+% Add affiliations after the authors
+\affil[1]{%
+    Polytechnique Montréal\\
+    Montréal, Canada
+}
+  
+  \begin{document}
+\maketitle
+
+\begin{abstract}
+Bayesian Neural Networks (BNNs) offer a principled framework for quantifying epistemic uncertainty. However, in classification tasks, propagating uncertainty through the standard Softmax function is analytically intractable, often forcing practitioners to rely on sampling or limiting approximations. In this paper we present analytically tractable real-to-categorical transformations that not only propagate uncertainty from latent logits to output probabilities, but also allow for the inference of the logit posteriors given observed labels, enabling end-to-end tractable training without relying on gradient backpropagation. We propose two classes for these transformations: a Locally Linearized Softmax baseline and a probabilistic Moment-Matching approach. Within the latter, we formulate MM-Softmax and introduce MM-Remax, a variant that replaces the exponential function from Softmax with a ReLU to ensure numerical stability. Similar to standard Softmax layers, our methods output categorical probabilities, but uniquely allow for analytical posterior updates. Our experiments on synthetic data, MNIST, and CIFAR-10 demonstrate that MM-Remax closely matches Monte Carlo moment estimates while enabling robust end-to-end training.
+\end{abstract}
+
+\section{Introduction}
+In this work, we address the challenge of creating analytically tractable \textit{real-to-categorical transformations} for BNNs, enabling the explicit quantification of epistemic uncertainty in output predictions. We define a real-to-categorical transformation as a function mapping a latent real-valued vector $\bm{z}$ to an output probability vector $\bm{a}$. We aim to apply this transformation to a Gaussian input vector,
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/figure01_v7.pdf}
+    \caption{Example of the forward and backward passes in a BNN using our proposed MM-Remax transformation. The forward pass computes the categorical probability distributions, while the backward pass updates the posterior logits using the computed input-output cross-covariance and the observation of a "cat" label.}
+    \label{fig:figure01}
+\end{figure}
+denoted $\bm{Z} \sim \mathcal{N}(\bm{\mu}_{\bm{Z}}, \bm{\Sigma}_{\bm{Z}})$. Although the true output probabilities $\bm{A}$ reside on the simplex, we approximate their distribution as a Gaussian vector $\bm{A} \sim \mathcal{N}(\bm{\mu}_{\bm{A}}, \bm{\Sigma}_{\bm{A}})$. Figure~\ref{fig:figure01} illustrates how our proposed MM-Remax allows us not only to obtain probability distributions over categorical outputs but also to analytically update the posterior logits given an observation using Gaussian conditional equations. 
+
+While Monte Carlo (MC) sampling can approximate such transformations, it creates significant computational overhead \citep{Mucsanyietal2025}. For frameworks such as Tractable Approximate Gaussian Inference (TAGI) \citep{goulet2021tractable,nguyen2022analytically}, maintaining a fully analytical process is essential for scalability. Unlike sampling-based or gradient-optimization approaches, TAGI relies on a recursive analytical inference mechanism to update parameters without a scalar loss function. Consequently, a tractable classification layer must satisfy two strict analytical conditions:
+\begin{enumerate}
+    \item \textbf{Forward Tractability:} The first two moments of the output probabilities ($\bm{\mu}_{\bm{A}}, \bm{\sigma}_{\bm{A}}$) must be analytically computable given the Gaussian input logits;
+    \item \textbf{Backward Tractability:} The input-output cross-covariance, $\text{Cov}(\bm{Z}, \bm{A})$, must be analytically computable. This term is required to propagate posterior information from observed labels back to the latent logits via the Gaussian conditional equations.
+\end{enumerate}
+
+Given these conditions, capturing the output for the standard Softmax function applied to Gaussian inputs is intractable as no exact analytical solution is available for the moments and cross-covariance required by TAGI. To address these requirements, we propose and analyze two distinct classes of analytical approximations:
+\begin{enumerate}
+    \item \textbf{Locally Linearized Softmax (LL-Softmax):} A baseline approach that applies a first-order Taylor expansion to the standard Softmax function, enabling a direct propagation of moments via the Jacobian;
+    \item \textbf{Moment-Matching Transformations:} A probabilistic approach that approximates the output distribution by explicitly matching the moments of the transformed variables. We introduce two instantiations of this method: \textbf{MM-Softmax}, which retains the exponential mapping, and \textbf{MM-Remax}, a novel function that replaces the exponential with a rectified linear unit to enhance numerical stability in high-variance regimes.
+\end{enumerate}
+
+Our contributions are as follows:
+\begin{itemize}
+    \item We provide complete analytical derivations for the forward moments and the input-output cross-covariance for both the locally linearized baseline and the moment-matching methods;
+    \item We empirically verify these methods on synthetic data and validate them on the MNIST \citep{lecun1998gradient} and CIFAR-10 \citep{krizhevsky2009learning} benchmarks, analyzing their stability and performance to determine which transformation enables the most robust end-to-end posterior inference in BNNs using TAGI.
+\end{itemize}
+
+By establishing this baseline of training stability and predictive moment accuracy compared to a Monte Carlo reference, we lay the groundwork for future evaluations of downstream probabilistic tasks, such as predictive calibration and out-of-distribution detection.
+
+% --- Related Work ---
+\section{Related Work}
+\vspace{-1em}
+To address the intractability of parameter estimation in BNNs, a wide range of approximate inference paradigms have been proposed. Foundational approaches \citep{neal1993probabilistic, mackay1992practical, Wainwright2008GraphicalME, lakshminarayanan2017simple} have been expanded upon by modern scalable methods, such as Laplace approximations \citep{daxberger2021laplace} and Spectral-Normalized Gaussian Processes (SNGP) \citep{liu2020simple}, underscoring the sustained necessity of Bayesian methods in modern deep learning \citep{pmlr-v235-papamarkou24b}. However, regardless of the underlying inference mechanism, these approaches share a common challenge in classification tasks: the lack of an analytically tractable real-to-categorical transformation.
+
+Because most approaches rely on the Softmax function applied to Gaussian logits, the analytical intractability of the resulting Gaussian-Softmax integral has motivated various approximation strategies. Early approaches bounded this integral to facilitate parameter estimation \citep{bouchard_efficient_2007}, but this only captures uncertainty within the logits rather than explicitly propagating it to the final categorical probabilities. Subsequently, \cite{daunizeau2017semi} proposed a semi-analytical method approximating the Softmax mean and covariance via a sigmoid expansion. More recent efforts map logit-space Gaussians directly onto the probability simplex. The Laplace Bridge \citep{hobbhahn2022fast} constructs a mapping to Dirichlet distributions to capture output variance, while \cite{shekhovtsov2018feed} developed a method to propagate the full output covariance structure, improving upon the independence assumptions of Mean-Field approximations \citep{lu_mean-field_2021}. However, recent benchmarks indicate that these approximations can still incur significant precision loss compared to MC baselines \citep{Mucsanyietal2025}. Furthermore, they are strictly designed for the predictive marginalization of uncertainty within models trained via gradient backpropagation.
+
+\begin{figure*}[t]
+    \centering
+    \include{update-tagi} % This command requires a .tex file 
+    \vspace{-2em} % Placeholder space for the figure
+    \caption{Direct acyclic graph illustrating the recursive layer-wise inference. Cyan arrows indicate inference directions.}
+    \label{fig:update-tagi}
+\end{figure*}
+
+To address these approximation limitations, \cite{Mucsanyietal2025} proposes replacing the Softmax function with analytically tractable alternatives. They substituted Softmax with element-wise Probit NormCDF or Sigmoid activations, demonstrating that these transformations allow for the closed-form computation of predictive means and can be matched to Dirichlet distributions to capture second-order uncertainty (i.e., the variance of the probabilities). Because these replacements are purpose-built for frameworks that rely on gradient-based optimization, they focus strictly on computing the prior predictive of the categorical probabilities. Consequently, they do not allow computing the cross-covariance term, $\text{Cov}(\bm{Z}, \bm{A})$. Our work directly addresses this gap by leveraging a moment-matching perspective to derive not only the first two predictive moments of these functions but also this exact cross-covariance, enabling end-to-end analytical inference.
+
+
+% --- BACKGROUND ---
+\section{Background}
+Before presenting our analytically tractable real-to-categorical transformations, we will first summarize how Tractable Approximate Gaussian Inference works and show why the input-output cross-covariance, $\text{Cov}(\bm{Z}, \bm{A})$, is needed for learning in the design of the transformation. The TAGI method proposed by \cite{goulet2021tractable, nguyen2022analytically} enables the analytical estimation of the posterior of the parameters in BNNs. TAGI relies on the assumption that all random variables in the network, including inputs, weights, biases, and hidden units, are described by Gaussian random variables.
+
+In a feedforward neural network, propagating uncertainty to hidden units $Z_{i}^{(j+1)} = \sum_k W_{i,k}^{(j)} A_k^{(j)} + B_i^{(j)}$ involves the product of Gaussian weights and activations. Because this product is non-Gaussian, TAGI employs the Gaussian Multiplicative Approximation (GMA) to analytically match the exact mean, variance, and cross-covariance of the product, thereby approximating the resulting distribution as a Gaussian to maintain tractability.
+
+To handle the non-linear activation functions, TAGI employs different analytical propagation techniques. While a first-order Taylor series expansion at the expected value $\bm{\mu}_{\bm{Z}}$ can be used for arbitrary functions, TAGI leverages exact analytic solutions for the moments of common activations, such as ReLU. This combined approach allows computing the prior/posterior predictive moments for all hidden units up to the output layer, $\bm{Z}^{(\mathtt{O})}$, as well as all necessary cross-covariances.
+
+The observation model is defined as $\bm{y} = \bm{z}^{(\mathtt{O})} + \bm{v}$, where $\bm{v}$ is a zero-mean Gaussian noise term, $\bm{V} \sim \mathcal{N}(\bm{0}, \bm{\Sigma}_{\bm{V}})$. The forward pass provides the prior predictive distribution for the output $f(\bm{y}) = \mathcal{N}(\bm{y}; \bm{\mu}_{\bm{Y}}, \bm{\Sigma}_{\bm{Y}})$, where $\bm{\mu}_{\bm{Y}} = \bm{\mu}_{\bm{Z}^{(\mathtt{O})}}$ and $\bm{\Sigma}_{\bm{Y}} = \bm{\Sigma}_{\bm{Z}^{(\mathtt{O})}} + \bm{\Sigma}_{\bm{V}}$.
+
+Once an observation $\bm{y}$ is available, the posterior for the output units $f(\bm{z}^{(\mathtt{O})}|\bm{y})$ is computed analytically using the standard Gaussian conditional equations. The posterior moments $\bm{\mu}_{\bm{Z}^{(\mathtt{O})}|\bm{y}}$ and $\bm{\Sigma}_{\bm{Z}^{(\mathtt{O})}|\bm{y}}$ are obtained as
+\begin{equation}
+\begin{aligned}
+\bm{\mu}_{\bm{Z}^{(\mathtt{O})}|\bm{y}} &= \bm{\mu}_{\bm{Z}^{(\mathtt{O})}} + \bm{\Sigma}_{\bm{Y}\!\bm{Z}^{(\mathtt{O})}}^{\intercal}\bm{\Sigma}_{\bm{Y}}^{-1}(\bm{y}-\bm{\mu}_{\bm{Y}}), \\
+\bm{\Sigma}_{\bm{Z}^{(\mathtt{O})}|\bm{y}} &= \bm{\Sigma}_{\bm{Z}^{(\mathtt{O})}} - \bm{\Sigma}_{\bm{Y}\!\bm{Z}^{(\mathtt{O})}}^{\intercal}\bm{\Sigma}_{\bm{Y}}^{-1}\bm{\Sigma}_{\bm{Y}\!\bm{Z}^{(\mathtt{O})}}.
+\end{aligned}
+\label{eq:gaussian_conditionals}
+\end{equation}
+A full network-wise update of all parameters $\bm{\theta}$ would be computationally prohibitive. TAGI achieves tractability by first assuming a diagonal covariance structure for parameters and hidden units, and second, by leveraging the conditional independence between layers (i.e., $\bm{Z}^{(j-1)} \perp \bm{Z}^{(j+1)} | \bm{z}^{(j)}$). With the posterior for the output layer $f(\bm{z}^{(\mathtt{O})}|\bm{y})$ computed, TAGI performs a recursive, layer-wise backward pass using the Rauch-Tung-Striebel (RTS) update equations \citep{rauch1965maximum} as shown in Figure \ref{fig:update-tagi}. This procedure propagates the posterior information from the output layer back through the network, analytically updating the posterior mean and variance for the hidden units $\bm{Z}^{(j)}$ and parameters $\bm{\theta}^{(j)}$ at each layer $j$. 
+
+Initiating this backward pass requires computing the posterior of the output layer logits, $f(\bm{z}^{(\mathtt{O})}|\bm{y})$. As shown in Equation~\ref{eq:gaussian_conditionals}, this initial update relies entirely on the cross-covariance between the network output and the latent logits, $\bm{\Sigma}_{\bm{Y}\!\bm{Z}^{(\mathtt{O})}}$. Consequently, an analytically tractable real-to-categorical transformation that provides this cross-covariance is required to update the logits given a class label and enable end-to-end learning via Gaussian conditioning. Once this output posterior is obtained, the recursive layer-wise Gaussian inference, combined with the diagonal covariance assumptions, allows TAGI to achieve a linear computational complexity with respect to the number of parameters, the same as gradient backpropagation.
+
+% --- METHODOLOGY ---
+\section{Analytically Tractable Real-to-Categorical Transformations}
+
+In this section, we introduce two approaches to enable analytically tractable real-to-categorical transformations for Bayesian neural networks. We apply this transformation to a Gaussian input vector with a diagonal covariance matrix, denoted as $\bm{Z} \sim \mathcal{N}\big(\bm{\mu}_{\bm{Z}}, \text{diag}(\bm{\sigma}_{\bm{Z}}^2)\big)$ and approximate the output as a Gaussian $\bm{A} \sim \mathcal{N}\big(\bm{\mu}_{\bm{A}}, \text{diag}(\bm{\sigma}_{\bm{A}}^2)\big)$. 
+
+
+The proposed methods aim to analytically compute the first and second moments of the output ($\bm{\mu}_{\bm{A}}$ and $\bm{\sigma}_{\bm{A}}^2$) as well as the input-output cross-covariance $\text{Cov}(\bm{Z},\bm{A})$. These components are essential for the Tractable Approximate Gaussian Inference (TAGI) method, enabling forward uncertainty propagation and backward posterior updates via Gaussian conditional equations.
+
+The \textrm{Softmax} function is the standard mapping from real-valued logits to a categorical probability distribution, making it a natural starting point for developing a tractable probabilistic transformation. However, the exact moments of a \textrm{Softmax} function applied to a Gaussian input $\bm{Z}$ are analytically intractable.
+
+\subsection{Locally Linearized Softmax (LL-Softmax)}\label{sec:linearized-softmax}
+A first naive baseline to tractably approximate the moments and cross-covariance for the Softmax function, relies on a first-order Taylor expansion. For that, we linearize the function $A_i =\textrm{Softmax}_i(\bm{Z})$ around the input expected value $\bm{\mu}_{\bm{Z}}$. The complete derivations are detailed in Appendix~\ref{app:local_linearization-softmax-simple}, where the expected value and variance are approximated as
+\begin{align*}
+\mu_{A_i} &\approx \frac{\exp(\mu_{Z_i})}{\sum_k \exp(\mu_{Z_k})},\\
+\sigma_{A_i}^2 &\approx \big(\mu_{A_i}(1-\mu_{A_i})\big)^2 \sigma_{Z_i}^2.
+\end{align*}
+For the variance approximation, we assume that $\sigma_{A_i}^2$ is primarily driven by the variance of the corresponding input $\sigma_{Z_i}^2$, neglecting off-diagonal contributions from $Z_j$ ($\forall j \neq i$). This assumption simplifies the computation by retaining only the diagonal elements of the Jacobian. Consequently, the covariance between the input $Z_i$ and output $A_i$ is given by
+\begin{equation*}
+\text{Cov}(Z_i, A_i) \approx \mu_{A_i}(1-\mu_{A_i}) \sigma_{Z_i}^2.
+\end{equation*}
+Notably, in this approximation, the output expected value $\mu_{A_i}$ depends solely on the input means $\bm{\mu}_{\bm{Z}}$; i.e., the input uncertainty $\bm{\sigma}_{\bm{Z}}^2$ does not influence the output expected value.
+
+\subsection{Moment-Matching Transformations}\label{sec:moment-matching}
+The second approach relies on a moment-matching method to approximate the transformations in the form $A_i = g(Z_i) / \sum_j g(Z_j)$, where $g(\cdot)$ is a non-linear, non-negative function.
+
+The method begins by applying $g(\cdot)$ to each independent Gaussian input $Z_i \sim \mathcal{N}(\mu_{Z_i}, \sigma_{Z_i}^2)$ to obtain a non-negative random variable $M_i = g(Z_i)$. We analytically compute the first two moments of this intermediate variable, $\mu_{M_i}$ and $\sigma_{M_i}^2$, along with the covariance $\text{Cov}(Z_i, M_i)$. The denominator $\tilde{M} = \sum_j M_j$ is formed by summing these independent components. Relying on the independence of the inputs $Z_i$, we calculate the exact moments of the denominator as
+\begin{align*}
+\mu_{\tilde{M}} &= \sum_j \mu_{M_j},\\
+\sigma_{\tilde{M}}^2 &= \sum_j \sigma_{M_j}^2.
+\end{align*}
+To compute the moments for the division $A_i = M_i / \tilde{M}$, we approximate the distributions of $M_i$ and $\tilde{M}$ as log-normal via moment matching, which allows reformulating the division as a subtraction in log-space. We map their moments to the corresponding log-space Gaussian parameters $(\mu_{\ln M}, \sigma_{\ln M}^2)$ using the relations
+\begin{align*}
+\sigma_{\ln{M}}^2 &= \ln\left(1+\frac{\sigma_{M}^2}{\mu_{M}^2}\right),\\
+\mu_{\ln{M}} &= \ln(\mu_{M}) - \frac{1}{2}\sigma_{\ln{M}}^2.
+\end{align*}
+The output in log-space is $\ln A_i = \ln M_i - \ln \tilde{M}$. Since this is the difference of two Gaussian variables, $\ln A_i$ is also Gaussian, $\ln A_i \sim \mathcal{N}(\mu_{\ln A_i}, \sigma_{\ln A_i}^2)$, with moments
+\begin{align*}
+\mu_{\ln A_i} &= \mu_{\ln M_i} - \mu_{\ln \tilde{M}},\\
+\sigma_{\ln A_i}^2 &= \sigma_{\ln M_i}^2 + \sigma_{\ln\tilde{M}}^2 - 2 \cdot \text{Cov} (\ln M_{i}, \ln\tilde{M}),
+\end{align*}
+where the covariance, derived in Appendix~\ref{app:log_space_covariance}, is 
+$$\text{Cov} (\ln M_{i}, \ln\tilde{M}) = \ln\left(1 + \frac{\text{Cov}(M_i, \tilde{M})}{\mu_{M_i}\mu_{\tilde{M}}}\right),$$ 
+which reflects the dependency coming from the common term in the numerator and denominator.
+
+The final output $A_i = \exp(\ln A_i)$ is modeled as a log-normal distribution with moments recovered from the log-space parameters as
+\begin{align*}
+\mu_{{A}_i} &= \exp\left(\mu_{\ln{A}_i}+\frac{1}{2}\sigma_{\ln{A}_i}^2\right),\\
+\sigma_{{A}_i}^2 &= \mu_{{A}_i}^2 \left(\exp(\sigma_{\ln{A}_i}^2)-1\right).
+\end{align*}
+To maintain conjugacy in the network, we approximate this log-normal output $A_i$ as a Gaussian random variable $\mathcal{N}(\mu_{{A}_i},\sigma_{{A}_i}^2)$. However, due to the approximations involved, the resulting output expected value $\bm{\mu}_{\bm{A}}$ may not sum exactly to one. To satisfy $0 \le \mu_{A_i} \le 1$ and $\sum_i \mu_{A_i} = 1$, we introduce a scaling factor $s = \sum_j \mu_{A_j}$ and normalize the final moments so that
+\begin{equation*}
+\mu_{A_i} \leftarrow \frac{\mu_{A_i}}{s}, \quad \sigma_{A_i}^2 \leftarrow \frac{\sigma_{A_i}^2}{s^2}.
+\end{equation*}
+We then compute the input-output cross-covariance given by (see Appendix~\ref{app:cov_a_z})
+% $\text{Cov}(Z_i, A_i)$.
+\begin{equation*}
+\text{Cov}(Z_i, A_i) \approx \mu_{A_i} \cdot \text{Cov}(Z_i, M_i) \left( \frac{1}{\mu_{M_i}} - \frac{1}{\mu_{\tilde{M}}} \right).
+\end{equation*}
+To guarantee a valid correlation structure and prevent numerical artifacts introduced by the analytical approximations, this covariance is bounded using the Cauchy-Schwarz inequality, ensuring that $|\text{Cov}(Z_i, A_i)| \le \sigma_{Z_i} \sigma_{A_i}$.
+
+We present two instantiations of this method, Moment-Matching Softmax and Moment-Matching Remax, which differ only in the choice of the function $g(\cdot)$.
+
+\subsubsection{Moment-Matching Softmax (MM-Softmax)}
+This method approximates the standard \textrm{Softmax} by setting $g(z) = \exp(z)$. The variable $M_i = \exp(Z_i)$ follows a log-normal distribution, $M_i \sim \ln \mathcal{N}(\mu_{Z_i}, \sigma_{Z_i}^2)$, with moments
+\begin{align*}
+\mu_{M_i} &= \exp\left(\mu_{Z_i}+\frac{1}{2}\sigma_{Z_i}^2\right),\\
+\sigma_{M_i}^2 &= \mu_{M_i}^2 \left(\exp(\sigma_{Z_i}^2)-1\right).
+\end{align*}
+The covariance between the input and the numerator is given by (see Appendix~\ref{app:cov_z_m})
+\begin{equation*}
+\text{Cov}(Z_i, M_i) = \sigma_{Z_i}^2 \mu_{M_i}.
+\end{equation*}
+Substituting these into the moment-matching process, illustrated schematically in Figure~\ref{fig:mm_procedure}, produces the output moments $\bm{\mu}_{\bm{A}}$ and $\bm{\sigma}_{\bm{A}}^2$. The final input-output cross-covariance simplified from the general covariance equation (see Appendix~\ref{app:cov_a_z})
+\begin{equation*}
+\text{Cov}(Z_i, A_i) \approx \mu_{A_i} \left(\sigma_{Z_i}^2 - \text{Cov}(Z_i, \ln \tilde{M})\right).
+\end{equation*}
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.0\linewidth]{figures/mm_softmax_procedure_compact.pdf}
+\caption{\textbf{Step-by-step visualization of the Moment-Matching Softmax procedure and comparison with MC.} The figure tracks the propagation of probability distributions from \textbf{(1)} input Gaussian logits $\bm{Z}$, through \textbf{(2)} the element-wise exponential transformation $\bm{M}$, and \textbf{(3)} the summation $\tilde{M}$, to \textbf{(4)} the final output probabilities $\bm{A}$. Solid lines and error bars represent our analytical Gaussian approximations through their moments, and the true distributions (dashed lines) estimated via MC sampling ($\mathtt{N}=10^6$).}
+\label{fig:mm_procedure}
+\end{figure}
+\vspace{-2em}
+\subsubsection{Moment-Matching Remax (MM-Remax)}\label{sec:mm-remax}
+The second instantiation of this method, which we call \textsc{Remax}, employs the Rectified Linear Unit (ReLU) as the non-negative function $g(z) = \text{ReLU}(z)$. This formulation follows a similar logic to transformations used in other contexts as \textit{Linear Attention Normalization} or \textit{ReLU Normalization} \citep{guo2024slab}. As we will demonstrate in the experiments in Section \ref{sec:experiments}, this transformation offers robustness to large variances in the logits often encountered during training. The \textsc{Remax} function is defined as
+\begin{equation*}
+\text{Pr}(i|\bm{z}) = \operatorname{Remax}(\bm{z})_i = \frac{\text{ReLU}(z_i)}{\sum_j \text{ReLU}(z_j)}.
+\end{equation*}
+The variable $M_i = \mathrm{ReLU}(Z_i)$ follows a rectified Gaussian distribution. Its first two moments and input-output covariance are given by~\cite{huber2020bayesian} as
+\begin{align*}
+\mu_{M_i} &= \sigma_{Z_i} \phi(\alpha_i) + \mu_{Z_i} \Phi(\alpha_i), \\
+\sigma_{M_i}^2 &= -\mu_{M_i}^2 + 2\mu_{M_i}\mu_{Z_i} - \mu_{Z_i}\sigma_{Z_i} \phi(\alpha_i) \\
+&\quad + (\sigma_{Z_i}^2-\mu_{Z_i}^2)\Phi(\alpha_i), \\
+\text{Cov}(M_i,Z_i) &= \sigma_{Z_i}^2 \Phi(\alpha_i),
+\end{align*}
+where $\alpha_i = \mu_{Z_i}/\sigma_{Z_i}$, and $\phi, \Phi$ denote the PDF and CDF of the standard normal distribution, respectively. Unlike a deterministic ReLU that evaluates to exactly zero for negative inputs, the rectified Gaussian incorporates the input variance $\sigma_{Z_i}^2$. This ensures that the expected value $\mu_{M_i}$ remains strictly positive even when the input expected value $\mu_{Z_i}$ is negative, preventing exact zero-division during normalization.
+
+These moments are processed through the general moment-matching transformations to obtain the output moments $\bm{\mu}_{\bm{A}}$ and $\bm{\sigma}_{\bm{A}}^2$.
+
+For the input-output cross-covariance $\text{Cov}(Z_i, A_i)$, the general covariance equation derived in Appendix~\ref{app:cov_a_z} has shown to be numerically unstable. Although $\mu_{M_i}$ is strictly positive, this general form depends on a term proportional to $1/\mu_{M_i}$, which is unstable for inactive units, where $\mu_{M_i} \to 0$, causing singularities. To avoid this, we instead linearize the relation between input and output using a chain-rule-based formulation, detailed in Appendix~\ref{app:cov_remax_chain}. This projects the output covariance back to the input space via the regression coefficient $\beta_{M_i, Z_i}$, such that
+\begin{equation*}
+\text{Cov}(Z_i, A_i) \approx \text{Cov}(A_i, M_i) \cdot \underbrace{\frac{\text{Cov}(M_i, Z_i)}{\sigma_{Z_i}^2}}_{\beta_{M_i, Z_i}}.
+\end{equation*}
+Substituting the analytical expression for $\text{Cov}(M_i, Z_i)$ into this equation simplifies the coefficient $\beta_{M_i, Z_i}$ to $\Phi(\alpha_i)$. This effectively gates the covariance: as a unit becomes inactive ($\alpha_i \to -\infty$), $\Phi(\alpha_i) \to 0$, naturally damping the covariance rather than amplifying it via division.
+
+\subsection{Complexity Analysis}
+
+We analyze the computational and space complexity with respect to the output dimension $\mathtt{K}$.
+
+\textbf{Locally Linearized Softmax.} This method uses a diagonal approximation of the Jacobian, restricting computations to element-wise operations for both the output moments $\bm{\mu}_{\bm{A}}, \bm{\sigma}_{\bm{A}}^2$ and the input-output covariance $\text{Cov}(\bm{Z}, \bm{A})$. Consequently, both time and space complexities are $\mathcal{O}(\mathtt{K})$.
+
+\textbf{Moment-Matching Transformations.} The MM-Softmax and MM-Remax algorithms consist of three sequential steps: (1) element-wise mapping $Z_i \to M_i$, (2) scalar reduction $\tilde{M} = \sum M_i$, and (3) element-wise log-space subtraction. The input-output cross-covariance is similarly derived via analytical approximations that decompose into element-wise statistics. This formulation avoids the construction of a dense covariance matrix, maintaining $\mathcal{O}(\mathtt{K})$ for both time and space complexity.
+
+All proposed methods therefore preserve the linear scalability of the TAGI framework. 
+
+% --- EXPERIMENTAL SETUP ---
+\section{Experiments}
+\label{sec:experiments}
+
+In this section, we empirically verify and validate the performance of the proposed methods: Locally Linearized Softmax (LL-Softmax), Moment-Matching Softmax (MM-Softmax), and Moment-Matching Remax (MM-Remax). The evaluation consists of two stages:
+\begin{enumerate}
+    \item \textbf{Verification (\S\ref{sec:verification}):} We assess the fidelity of the analytical moment approximations against Monte Carlo estimates in controlled synthetic scenarios.
+    \item \textbf{Validation (\S\ref{sec:validation}):} We integrate these transformations into Bayesian neural networks trained with TAGI.
+\end{enumerate}
+Our code for experimentation is available at \url{https://anonymous.4open.science/r/trtc-bnn-B6EB}.
+% and the low-level methods implementations are available in the open-source $\mathtt{cuTAGI}$ library \citep{cutagi2022}.
+
+% --------------------------------------------------------------------
+\subsection{Verification of Analytical Moments}
+\label{sec:verification}
+
+To verify the accuracy of our proposed transformations, we compare the computed output moments ($\bm{\mu}_{\bm{A}}, \bm{\sigma}_{\bm{A}}^2$) and input-output cross-covariances against estimates obtained via Monte Carlo sampling ($\mathtt{N}=10^5$).
+
+\textbf{Qualitative Comparison.}
+Figure~\ref{fig:combined_error_charts} presents a visual comparison of the output moments for a shared Gaussian input $\bm{Z}$ with 10 variables. We observe that the naive baseline LL-Softmax fails to accurately capture both the output expected value and variance. MM-Softmax accurately captures the expected value but struggles to model the variance. In contrast, MM-Remax maintains a robust approximation for the first two moments that closely matches the ground truth.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/all_methods_comparison.pdf}
+    \caption{Verification of analytical moment approximations. \textit{Top:} The shared Gaussian input distribution ($\bm{Z}$). \textit{Rows 2-4:} Comparison of the resulting output distributions using LL-Softmax, MM-Softmax, and MM-Remax, respectively, compared to the Monte Carlo (MC) estimates.}
+    \label{fig:combined_error_charts}
+\end{figure}
+
+\textbf{Quantitative Error Analysis.}
+Next, we quantify the approximation error across a diverse grid of 6,000 input scenarios for $\mathtt{K}=10$ classes (generation details in Appendix~\ref{app:experimental_configurations}). Figure~\ref{fig:mae_heatmaps} displays the Mean Absolute Error (MAE) relative to the MC estimates.
+
+The heatmaps reveal a clear failure for the MM-Softmax, where the error is unacceptably large for large input variance $\bm{\sigma}_{\bm{Z}}^2$. The LL-Softmax also shows poor approximations specially for the correlation coefficient derived from the input-output cross-covariance, $\text{Cov}(\bm{Z}, \bm{A})$, on medium and large input variance scenarios. We additionally compare the moment accuracy against the NormCDF approximation proposed by \cite{Mucsanyietal2025}. While NormCDF achieves competitive MAE in all regimes, it does not provide the input-output cross-covariance, essential for updating the posterior of the latent variables given an observation via analytical conditioning rather than gradient backpropagation. We provide the same quantitative error analysis for $\mathtt{K}=100$ and $\mathtt{K}=1000$ in Appendix~\ref{app:extension_classes}, where the MM-Remax remains competitive with NormCDF, while outperforming LL-Softmax and MM-Softmax.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/mae_combined_heatmap_10.pdf}
+    \caption{MAE of the output moments ($\bm{\mu_A}$ and $\bm{\sigma_A}^2$) and correlation coefficients relative to MC estimates on different scenarios of input expected values and variance. Scenarios target to represent possible situations while training the BNN at different epochs and different levels of epistemic uncertainty. Darker regions indicate lower error. Note that NormCDF by \cite{Mucsanyietal2025} lacks the cross-covariance term required for updating the posterior of the latent variables.}
+    \label{fig:mae_heatmaps}
+    \vspace{-1em}
+\end{figure}
+
+\textbf{Theoretical Limitation of LL-Softmax.}
+Figure~\ref{fig:softmax_variance_delta_grid} illustrates a 10-class classification scenario consisting of one dominant class and nine competing classes. We evaluate how the expected output probability of the dominant class behaves as we systematically vary two parameters: the margin between the dominant and competing input means ($\Delta\mu$), and the shared input variance ($\bm{\sigma}_{\bm{Z}}^2$) applied across all inputs.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/softmax_remax_variance_delta_comparison.pdf}
+    \caption{Impact of the input variance and the mean margin ($\Delta\mu$) on the expected output probabilities for the proposed methods, alongside the MAE of MM-Softmax and MM-Remax compared to MC sampling.}
+    \label{fig:softmax_variance_delta_grid}
+\end{figure}
+As shown in the \textit{Top Left} panel, LL-Softmax predicts a constant expected value that is strictly invariant to changes in input variance. Consequently, it effectively discards the epistemic uncertainty propagated through the network. In contrast, the \textit{Top Center} panel demonstrates that MM-Softmax correctly modulates the expected value as uncertainty increases. However, when compared to MC sampling (\textit{Top Right} panel), it can be seen that the exponential formulation of MM-Softmax renders this modulation highly innacurate in high-variance regimes. 
+
+Finally, the \textit{Bottom} panels display the behavior of MM-Remax. Like MM-Softmax, it correctly modulates the output based on input variance, but it achieves this while maintaining a negligible error relative to the MC estimates.
+
+% --------------------------------------------------------------------
+\subsection{Validation on Image Classification}
+\label{sec:validation}
+We evaluate whether our proposed real-to-categorical transformations successfully support end-to-end training by enabling both forward uncertainty propagation and backward posterior updates within the TAGI framework.
+
+\textbf{Experimental Setup.}
+We evaluate the proposed methods on the MNIST and CIFAR-10 benchmarks using three distinct architectures built with the open-source $\mathtt{cuTAGI}$ library
+% \footnote{
+%     To ensure reproducibility, we map the text terminology to the library class names: 
+%     \textit{LL-Softmax} corresponds to \texttt{Softmax}, 
+%     \textit{MM-Softmax} to \texttt{ClosedFormSoftmax}, 
+%     \textit{MM-Remax} to \texttt{Remax}, and 
+%     \textit{Hierarchical Decomposition} to \texttt{HRCSoftmax}.
+% } 
+\citep{cutagi2022}: (1) FNN (MNIST). A Multi-Layer Perceptron with two hidden layers of 2,048 units each and ReLU activations. (2) 3-Block CNN (CIFAR-10). A network consisting of six convolutional layers grouped into three blocks using stride-2 convolutions followed by two fully connected layers. (3) A ResNet-18 \citep{he2016deep} backbone for CIFAR-10 implemented in $\mathtt{cuTAGI}$, serving as a scalability test. 
+
+For the benchmark results summarized in Table~\ref{tab:accuracy_results}, we set the default observation noise standard deviation to $\sigma_V = 0.01$. However, to prevent numerical collapse during the first epochs of training, we relaxed this to $\sigma_V = 0.05$ for the LL-Softmax and MM-Softmax methods on the convolutional architectures. Model performance was evaluated using early stopping within 10 epochs based on the minimum validation error. Weights and biases are initialized using a default gain factor of $0.1$. All metrics reported are averaged over 20 independent random seeds.
+
+\textbf{Training Stability and Convergence.}
+As Table~\ref{tab:accuracy_results} shows, a major finding is that both Softmax analytical approximations are numerically unstable for deep architectures. Despite using higher observation noise to stabilize early epochs, training for both LL-Softmax and MM-Softmax inevitably diverges, eventually resulting in numerical collapse, i.e., NaN outputs; the exponential nature of Softmax amplifies logit variance, leading to numerical overflow in the variance and covariance computations essential for the backward pass. Consequently, the metrics reported for the Softmax methods represent the test accuracy at the optimal validation epoch strictly prior to divergence.
+
+To explicitly visualize this failure mode, we conducted a stability test on the CIFAR-10 3-Block CNN architecture, training the models for 50 epochs without early stopping and applying a uniform $\sigma_V = 0.05$ across all methods. Figure~\ref{fig:mae_comparison_wide} illustrates these training dynamics. While the Softmax models rapidly collapse, MM-Remax exhibits robust convergence without requiring ad-hoc stabilization heuristics. The MAE for MM-Remax moments obtained comparing the analytical outputs compared to MC estimates on the validation set remains strictly bounded at $0.05$ throughout the entire 50-epoch training process, and the MAE for the correlation coefficient stays consistent around $0.1$, showing stable and accurate approximation of the method during unobserved data predictions.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/methods_performance_remax_mae.pdf}
+    \caption{\textit{Left:} Test accuracy curves on CIFAR-10 (3-Block CNN) over a 50-epoch stress test with uniform observation noise ($\sigma_V = 0.05$). \textit{Right:} Evolution of the  MAE for MM-Remax output moments during the same extended training. The approximation remains stable as the network learns.}
+    \label{fig:mae_comparison_wide}
+\end{figure}
+
+\textbf{Generalization Performance.}
+Returning to the overall benchmark performance, we compare our methods against two TAGI baselines available in the $\mathtt{cuTAGI}$ library:
+\begin{enumerate}
+    \item \textbf{Logit Regression:} The model is trained directly on the latent logits $\bm{Z}$ without a \textit{real-to-categorical} transformation layer, treating the classification task as a regression problem onto binary target vectors $\in \{-1, 1\}^{\mathtt{K}}$.
+    \item \textbf{Hierarchical Decomposition (HRC Dec.):} A tree-structured approximation that decomposes the classification task into a sequence of independent binary regressions. It predicts fixed-path hierarchical binary decompositions $\in \{-1, 1\}^{\lceil \log_2 \mathtt{K} \rceil}$, rather than learning from the full one-hot categorical outputs.
+\end{enumerate}
+
+As detailed in Table~\ref{tab:accuracy_results}, MM-Remax is the only real-to-categorical layer that successfully trains to convergence on deeper architectures. It matches the performance of Hierarchical Decomposition \citep{goulet2021tractable} while offering a categorical output distribution compatible with typical deep learning architectures. This confirms that MM-Remax effectively bridges the gap between tractable inference and standard classification formulations, scaling effectively to the largest architectures (ResNet-18) currently supported by the $\mathtt{cuTAGI}$ library.
+
+\begin{table}[t]
+\centering
+\caption{Test accuracy (\%) on MNIST and CIFAR-10 using TAGI (Mean $\pm$ Std. over 20 seeds).}
+\label{tab:accuracy_results}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{MNIST} & \multicolumn{2}{c}{\textbf{CIFAR-10}} \\
+\cmidrule(lr){2-2} \cmidrule(lr){3-4}
+                   & \textbf{FNN} & \textbf{3-Block CNN} & \textbf{ResNet-18} \\
+\midrule
+LL-Softmax$^\dagger$ & $97.72 \pm 0.14$ & $74.68 \pm 2.60$ & $43.06 \pm 11.46$ \\
+MM-Softmax$^\dagger$ & $93.02 \pm 1.69$ & $73.98 \pm 2.42$ & $32.74 \pm 8.59$ \\
+\midrule
+Logit Regression   & $98.70 \pm 0.06$ & $81.32 \pm 0.62$ & $87.74 \pm 2.44$ \\
+HRC Dec.           & $98.50 \pm 0.07$ & $78.94 \pm 0.46$ & $89.15 \pm 1.32$ \\
+MM-Remax           & $97.56 \pm 0.11$ & $82.87 \pm 0.36$ & $89.06 \pm 0.68$ \\
+\bottomrule
+\multicolumn{4}{l}{\footnotesize $^\dagger$Models suffered from numerical collapse during training;} \\
+\multicolumn{4}{l}{\footnotesize reported metrics reflect peak validation performance prior to divergence.} \\
+\end{tabular}%
+}
+\end{table}
+
+
+% --- CONCLUSION ---
+\section{Conclusion}
+In this work, we introduced a novel moment-matching analytical framework for real-to-categorical transformations in Bayesian neural networks. Our approach not only enables the forward propagation of epistemic uncertainty from Gaussian inputs to the predictive distributions, but also allows analytical posterior inference, independent of gradient-based optimization. Our empirical evaluations demonstrate that while exponential-based approximations suffer from severe numerical instabilities in deep architectures, our ReLU-based method, MM-Remax, achieves robust convergence and accurate generalization on deeper architectures.
+
+We identify two primary limitations. First, to maintain analytical tractability and linear computational complexity, our derivations assume a diagonal covariance structure for the latent inputs, which fails to capture explicit class correlations. Second, as a foundational study, the current scope of this paper centers on training stability and predictive accuracy compared to an MC reference; now that a robust analytical baseline is established, an evaluation of how these transformations can be leveraged to improve predictive calibration and out-of-distribution (OOD) detection remains an important direction for future research. Notwithstanding these limitations, our moment-matching framework is highly modular, establishing a foundation where alternative analytically tractable non-negative function can also be integrated.
+
+Overcoming the analytical intractability of the Softmax operator in probabilistic architectures eliminates a major barrier in the development of advanced architectures with TAGI. By providing a stable, closed-form probabilistic approximation for categorical normalization, this work lays the foundations for the development of analytically tractable attention mechanisms.
+
+
+% \begin{contributions} % will be removed in pdf for initial submission 
+% 					  % (without ‘accepted’ option in \documentclass)
+%                       % so you can already fill it to test with the
+%                       % ‘accepted’ class option
+% M.F-M. contributed to the conceptualization, developed the experimental framework, created the figures, and wrote the manuscript. L-H.N. implemented the low-level C++/CUDA code for the methods. J-A.G. conceived the original idea and directed the research. G-A.B. provided project supervision.
+% \end{contributions}
+
+\begin{acknowledgements} % will be removed in pdf for initial submission,
+						 % (without ‘accepted’ option in \documentclass)
+                         % so you can already fill it to test with the
+                         % ‘accepted’ class option
+The development of this project was supported by research grants from the Natural Sciences and Engineering Research Council of Canada (NSERC), Hydro-Quebec and the Quebec Transportation Ministry (MTQ).
+\end{acknowledgements}
+
+% References
+\bibliography{uai2026-template}
+
+\newpage
+
+\onecolumn
+
+\title{Analytically Tractable Real to Categorical transformations \\ for Bayesian Neural Networks (Supplementary Material)}
+\maketitle
+
+\appendix
+\section{Derivations for Locally Linearized Softmax and Moment-Matching Transformations}\label{app:derivations}
+
+In this appendix, we provide the detailed derivations for the locally linearized Softmax approximations used in \S\ref{sec:linearized-softmax}. We also establish the general covariance identity and derive the specific covariance terms required for the Moment-Matching Softmax and Remax transformations presented in \S\ref{sec:moment-matching}.
+
+\subsection{Locally-Linear Softmax Derivations}\label{app:local_linearization-softmax-simple}
+
+Given a vector of independent Gaussian random variables $\bm{Z} \sim\mathcal{N}(\bm{z};\bm{\mu}_{\bm{Z}},\text{diag}(\bm{\sigma}_{\bm{Z}}^2))$ and the Softmax function, where the $i$-th output component is $A_i = \frac{\exp(Z_i)}{\sum_j \exp(Z_j)}$, we can approximate the moments of the output vector $\bm{A}$ by linearizing the function around the input mean $\bm{\mu}_{\bm{Z}}$. This requires the partial derivatives of $A_i$ with respect to each input $Z_j$, which form the Jacobian matrix $\mathbf{J}$, defined as
+\begin{equation*}
+\frac{\partial A_i}{\partial Z_j} =
+\begin{cases}
+A_i(1 - A_i) & \text{if } i = j, \\
+-A_i A_j & \text{if } i \neq j.
+\end{cases}
+\end{equation*}
+
+Denoting the value of the Jacobian evaluated at the mean $\bm{\mu}_{\bm{Z}}$ as $\mathbf{J}(\bm{\mu}_{\bm{Z}})$, and $\mu_{A_i} = \frac{\exp(\mu_{Z_i})}{\sum_j \exp(\mu_{Z_j})}$, the linearized approximation for $A_i$ is
+\begin{equation}
+\label{eq:Ai_approx}
+\begin{split}
+A_i &\approx f_i(\bm{\mu}_{\bm{Z}}) + \sum_j \frac{\partial f_i}{\partial Z_j}\bigg|_{\bm{Z}=\bm{\mu}_{\bm{Z}}} (Z_j - \mu_{Z_j}), \\
+A_i &\approx \mu_{A_i} + \mu_{A_i}(1-\mu_{A_i})(Z_i - \mu_{Z_i}) - \sum_{j \neq i} \mu_{A_i}\mu_{A_j}(Z_j - \mu_{Z_j}).
+\end{split}
+\end{equation}
+Since $A_i$ is approximated as a linear combination of Gaussian variables, its resulting distribution is also Gaussian, with the following approximated moments
+\begin{equation*}
+\label{eq:mu_Ai}
+\begin{split}
+\mu_{A_i} = \mathbb{E}[A_i] &\approx \mathbb{E}\left[\mu_{A_i} + \sum_j \mathbf{J}_{ij}\big|_{\bm{\mu}_{\bm{Z}}} (Z_j - \mu_{Z_j})\right] \\
+&= \mu_{A_i} + \sum_j \mathbf{J}_{ij}\big|_{\bm{\mu}_{\bm{Z}}} \mathbb{E}[Z_j - \mu_{Z_j}] \\
+&= \mu_{A_i},
+\end{split}
+\end{equation*}
+
+\begin{equation*}
+\label{eq:sigma_Ai}
+\begin{split}
+\sigma_{A_i}^2 = \text{Var}[A_i] &\approx \text{Var}\left[\mu_{A_i} + \sum_j \mathbf{J}_{ij}\big|_{\bm{\mu}_{\bm{Z}}} (Z_j - \mu_{Z_j})\right] \\
+&\approx \left(J_{ii}\big|_{\bm{\mu}_{\bm{Z}}}\right)^2 \text{Var}[Z_i] \\
+&= (\mu_{A_i}(1-\mu_{A_i}))^2 \sigma_{Z_i}^2,
+\end{split}
+\end{equation*}
+where consistent with the naive baseline assumption in \S\ref{sec:linearized-softmax}, we neglect the off-diagonal elements of the Jacobian ($j \neq i$) and consider only the diagonal term $\mathbf{J}_{ii} = \mu_{A_i}(1 - \mu_{A_i})$. Then the covariance between the input $Z_i$ and the output $A_i$ is approximated as
+\begin{equation*}
+\label{eq:cov_Zi_Ai}
+\begin{split}
+\text{Cov}(Z_i, A_i) &\approx \text{Cov}\left(Z_i, \mu_{A_i} + \sum_j \mathbf{J}_{ij}\big|_{\bm{\mu}_{\bm{Z}}} (Z_j - \mu_{Z_j})\right) \\
+&= \sum_j J_{ij}\big|_{\bm{\mu}_{\bm{Z}}} \text{Cov}(Z_i, Z_j) \\
+&= J_{ii}\big|_{\bm{\mu}_{\bm{Z}}} \cdot \text{Var}[Z_i] \\
+&= \mu_{A_i}(1-\mu_{A_i}) \cdot \sigma_{Z_i}^2,
+\end{split}
+\end{equation*}
+since the inputs are independent, $\text{Cov}(Z_i, Z_j)=0 \text{ for } i \neq j$.
+
+\subsection{Moment-Matching Derivations}
+\label{app:prob_softmax_derivations}
+This section provides detailed derivations for the covariance results used in the Moment-Matching formulation in \S\ref{sec:moment-matching}. We begin by establishing a general covariance identity for jointly Gaussian variables, related to Stein's Lemma \citep{stein1981lemma}. We then apply this identity to derive a single General Covariance Equation for $\text{Cov}(Z_i, A_i)$ that applies to both Softmax and Remax instantiations.
+
+\subsubsection{General Covariance Identity via Moment Generating Functions}
+Let $(X, Y)$ be a pair of jointly Gaussian random variables. The covariance between $X$ and the random variable $\exp(Y)$ is given by the identity
+\begin{equation}
+\label{eq:general_cov_identity}
+\text{Cov}(X, \exp(Y)) = \text{Cov}(X, Y) \cdot \mathbb{E}[\exp(Y)].
+\end{equation}
+This identity can be obtained using the joint Moment Generating Function (MGF). Let the pair $(X, Y)$ have means $(\mu_X, \mu_Y)$, variances $(\sigma_X^2, \sigma_Y^2)$, and covariance $\text{Cov}(X,Y)$. Their joint MGF is given by
+$$
+M_{X,Y}(t_1, t_2) = \mathbb{E}[\exp({t_1 X + t_2 Y})] = \exp\left(\mu_X t_1 + \mu_Y t_2 + \frac{1}{2}(\sigma_X^2 t_1^2 + \sigma_Y^2 t_2^2 + 2 \cdot \text{Cov}(X,Y)t_1 t_2)\right).
+$$
+The expectation $\mathbb{E}[X \exp(Y)]$ can be found by differentiating the MGF with respect to $t_1$ and evaluating at $t_1=0$ and $t_2=1$
+\begin{align*}
+\mathbb{E}[X \exp(Y)] &= \left.\frac{\partial}{\partial t_1} M_{X,Y}(t_1, t_2)\right|_{t_1=0, t_2=1} \\
+&= \left. M_{X,Y}(t_1, t_2) \cdot (\mu_X + \sigma_X^2 t_1 + \text{Cov}(X,Y)t_2) \right|_{t_1=0, t_2=1} \\
+&= M_{X,Y}(0, 1) \cdot (\mu_X + \text{Cov}(X,Y)).
+\end{align*}
+Since $M_{X,Y}(0, 1) = \mathbb{E}[\exp(Y)]$, we have $\mathbb{E}[X \exp(Y)] = \mathbb{E}[\exp(Y)] (\mu_X + \text{Cov}(X,Y))$. Substituting this into the definition of covariance, $\text{Cov}(X, \exp(Y)) = \mathbb{E}[X \exp(Y)] - \mathbb{E}[X]\mathbb{E}[\exp(Y)]$, produces
+\begin{align*}
+\text{Cov}(X, \exp(Y)) &= \mathbb{E}[\exp(Y)] (\mu_X + \text{Cov}(X,Y)) - \mu_X \mathbb{E}[\exp(Y)] \\
+&= \mathbb{E}[\exp(Y)] (\mu_X + \text{Cov}(X,Y) - \mu_X) \\
+&= \text{Cov}(X, Y) \cdot \mathbb{E}[\exp(Y)].
+\end{align*}
+
+\subsubsection{Derivation of $\mathrm{Cov}(Z_i, M_i)$}\label{app:cov_z_m}
+The covariance between a Gaussian input $Z_i$ and its log-normal counterpart $M_i = \exp(Z_i)$ is a special case of the general identity where $X = Y = Z_i$. Thus, from Eq.~\eqref{eq:general_cov_identity}
+\begin{align}
+\label{eq:cov_x_e_x}
+\begin{split}
+\text{Cov}(Z_i, M_i) &= \text{Cov}(Z_i, \exp({Z_i})) \\
+&= \text{Cov}(Z_i, Z_i) \cdot \mathbb{E}[\exp({Z_i})] \\
+&= \text{Var}(Z_i) \cdot \mathbb{E}[M_i] \\
+&= \sigma_{Z_i}^2 \mu_{M_i}.
+\end{split}
+\end{align}
+
+\subsubsection{Derivation of $\mathrm{Cov}(\ln M_i, \ln \tilde{M})$}
+\label{app:log_space_covariance}
+To establish the relationship for $\text{Cov}(\ln M_i, \ln \tilde{M})$, we use the properties of jointly Gaussian variables and their corresponding log-normal counterparts. Let $\ln M_i \sim \mathcal{N}(\mu_{\ln M_i}, \sigma_{\ln M_i}^2)$ and $\ln \tilde{M} \sim \mathcal{N}(\mu_{\ln \tilde{M}}, \sigma_{\ln \tilde{M}}^2)$ be jointly Gaussian. Their exponentials are $M_i = \exp(\ln M_i)$ and $\tilde{M} = \exp(\ln \tilde{M})$. The covariance between $M_i$ and $\tilde{M}$ is defined as $\text{Cov}(M_i, \tilde{M}) = \mathbb{E}[M_i \tilde{M}] - \mathbb{E}[M_i]\mathbb{E}[\tilde{M}]$.
+
+First, we find the expectation of the product $\mathbb{E}[M_i \tilde{M}]$. Since $\ln M_i + \ln \tilde{M}$ is a Gaussian variable, we can use its MGF
+\begin{align*}
+\mathbb{E}[M_i \tilde{M}] &= \mathbb{E}[\exp(\ln M_i + \ln \tilde{M})] \\
+&= \exp\left(\mathbb{E}[\ln M_i + \ln \tilde{M}] + \frac{1}{2} \cdot \text{Var}(\ln M_i + \ln \tilde{M})\right) \\
+&= \exp\left((\mu_{\ln M_i} + \mu_{\ln \tilde{M}}) + \frac{1}{2}(\sigma_{\ln M_i}^2 + \sigma_{\ln \tilde{M}}^2 + 2\cdot \text{Cov}(\ln M_i, \ln \tilde{M}))\right) \\
+&= \exp\left(\mu_{\ln M_i} + \mu_{\ln \tilde{M}} + \frac{1}{2}\sigma_{\ln M_i}^2 + \frac{1}{2}\sigma_{\ln \tilde{M}}^2\right) \exp\left(\text{Cov}(\ln M_i, \ln \tilde{M})\right).
+\end{align*}
+From the moments of a log-normal distribution, we have $\mathbb{E}[M_i] = \exp(\mu_{\ln M_i} + \frac{1}{2}\sigma_{\ln M_i}^2)$ and $\mathbb{E}[\tilde{M}] = \exp(\mu_{\ln \tilde{M}} + \frac{1}{2}\sigma_{\ln \tilde{M}}^2)$, so their product is given by
+$$
+\mathbb{E}[M_i]\mathbb{E}[\tilde{M}] = \exp\left(\mu_{\ln M_i} + \mu_{\ln \tilde{M}} + \frac{1}{2}\sigma_{\ln M_i}^2 + \frac{1}{2}\sigma_{\ln \tilde{M}}^2\right).
+$$
+Substituting these expressions into the definition of $\text{Cov}(M_i, \tilde{M})$ we have
+\begin{align*}
+\text{Cov}(M_i, \tilde{M}) &= \mathbb{E}[M_i]\mathbb{E}[\tilde{M}] \exp\left(\text{Cov}(\ln M_i, \ln \tilde{M})\right) - \mathbb{E}[M_i]\mathbb{E}[\tilde{M}] \\
+&= \mathbb{E}[M_i]\mathbb{E}[\tilde{M}] \left(\exp(\text{Cov}(\ln M_i, \ln \tilde{M})) - 1\right).
+\end{align*}
+We can rearrange this equation to solve for $\text{Cov}(\ln M_i, \ln \tilde{M})$
+\begin{align}
+\label{eq:final_cov_lnMi_lnMtilde}
+\begin{split}
+\frac{\text{Cov}(M_i, \tilde{M})}{\mathbb{E}[M_i]\mathbb{E}[\tilde{M}]} &= \exp(\text{Cov}(\ln M_i, \ln \tilde{M})) - 1, \\
+\text{Cov}(\ln M_i, \ln \tilde{M}) &= \ln\left(1 + \frac{\text{Cov}(M_i, \tilde{M})}{\mu_{M_i}\mu_{\tilde{M}}}\right).
+\end{split}
+\end{align}
+Since the inputs $Z_i$ are independent, $M_i$ is uncorrelated with $M_j$ for all $j \neq i$, and thus $\text{Cov}(M_i, \tilde{M}) = \text{Var}(M_i)$.
+
+\subsubsection{Derivation of $\mathrm{Cov}(Z_i, A_i)$ (General Covariance Equation)}\label{app:cov_a_z}
+We derive a unified expression for $\text{Cov}(Z_i, A_i)$ valid for any transformation $A_i = M_i / \tilde{M}$, where $M_i = g(Z_i)$ and $\tilde{M} = \sum_j M_j$. In log-space, this is $A_i = \exp(\ln M_i - \ln \tilde{M})$.
+Applying the general identity Eq.~\eqref{eq:general_cov_identity} with $X=Z_i$ and $Y = \ln M_i - \ln \tilde{M}$, we obtain
+\begin{equation*}
+\text{Cov}(Z_i, A_i) \approx \mu_{A_i} \cdot \left( \text{Cov}(Z_i, \ln M_i) - \text{Cov}(Z_i, \ln \tilde{M}) \right).
+\end{equation*}
+We obtain the log-space covariances by rearranging the identity as $\text{Cov}(X, \ln M) = \text{Cov}(X, M)/\mathbb{E}[M]$. For the first term, $\text{Cov}(Z_i, \ln M_i) = \text{Cov}(Z_i, M_i) / \mu_{M_i}$. For the second term, $\text{Cov}(Z_i, \ln \tilde{M}) = \text{Cov}(Z_i, \tilde{M}) / \mu_{\tilde{M}}$. Since inputs $Z_i$ are independent, $\text{Cov}(Z_i, \tilde{M}) = \text{Cov}(Z_i, M_i)$.
+Substituting these back produces the General Covariance Equation
+\begin{equation}
+\label{eq:general_master_cov}
+\text{Cov}(Z_i, A_i) \approx \mu_{A_i} \cdot \text{Cov}(Z_i, M_i) \left( \frac{1}{\mu_{M_i}} - \frac{1}{\mu_{\tilde{M}}} \right).
+\end{equation}
+
+\textbf{Specialization for Softmax:}
+For Softmax, $M_i = \exp(Z_i)$. Using the result from Appendix~\ref{app:cov_z_m} that $\text{Cov}(Z_i, M_i) = \sigma_{Z_i}^2 \mu_{M_i}$, the General Covariance Equation simplifies to
+\begin{equation*}
+\text{Cov}(Z_i, A_i) \approx \mu_{A_i} \cdot (\sigma_{Z_i}^2 \mu_{M_i}) \left( \frac{1}{\mu_{M_i}} - \frac{1}{\mu_{\tilde{M}}} \right).
+\end{equation*}
+Distributing the covariance term, the first term cancels ($\sigma_{Z_i}^2 \mu_{M_i} / \mu_{M_i} = \sigma_{Z_i}^2$), resulting in the compact Softmax form
+\begin{equation*}
+\text{Cov}(Z_i, A_i) \approx \mu_{A_i} \left( \sigma_{Z_i}^2 - \frac{\sigma_{Z_i}^2 \mu_{M_i}}{\mu_{\tilde{M}}} \right).
+\end{equation*}
+
+\subsubsection{Derivation of Remax Covariance (Chain Rule)}\label{app:cov_remax_chain}
+For the Remax instantiation, we approximate the input-output covariance using a chain rule decomposition $\text{Cov}(Z_i, A_i) \approx \text{Cov}(A_i, M_i) \beta_{M_i, Z_i}$ to avoid the numerical singularities associated with the $1/\mu_{M_i}$ term in Equation~\ref{eq:general_master_cov}.
+
+First, we determine $\text{Cov}(A_i, M_i)$ by treating $A_i$ and $M_i$ as log-normal variables, such that $A_i = \exp(\ln A_i)$ and $M_i = \exp(\ln M_i)$. We begin by computing the underlying log-space covariance using the definition $\ln A_i = \ln M_i - \ln \tilde{M}$
+\begin{align*}
+\text{Cov}(\ln A_i, \ln M_i) &= \text{Cov}(\ln M_i - \ln \tilde{M}, \ln M_i) \\
+&= \sigma_{\ln M_i}^2 - \text{Cov}(\ln M_i, \ln \tilde{M}).
+\end{align*}
+Substituting Eq.~\eqref{eq:final_cov_lnMi_lnMtilde} for the second term provides the analytical expression for the log-space covariance. Since $A_i$ and $M_i$ are approximated as jointly log-normal, the final real-space covariance is recovered using the standard log-normal identity
+\begin{equation*}
+\text{Cov}(A_i, M_i) \approx \mu_{A_i} \mu_{M_i} (\exp(\text{Cov}(\ln A_i, \ln M_i)) - 1).
+\end{equation*}
+
+Finally, we project this result to the input $Z_i$. The local linear dependence of the rectified unit $M_i$ on the input $Z_i$ is captured by the linear regression coefficient
+\begin{equation*}
+\beta_{M_i, Z_i} = \frac{\text{Cov}(M_i, Z_i)}{\text{Var}(Z_i)} = \frac{\sigma_{Z_i}^2 \Phi(\alpha_i)}{\sigma_{Z_i}^2} = \Phi(\alpha_i).
+\end{equation*}
+Multiplying these components results in the final covariance approximation $\text{Cov}(Z_i, A_i) \approx \text{Cov}(A_i, M_i) \Phi(\alpha_i)$.
+
+\section{Experiments}
+
+In this section we present the configurations used for the methods verification and additional results showing scalability when increasing the number of classes on synthetic data.
+
+\subsection{Experimental Configurations for verification}
+\label{app:experimental_configurations}
+
+To validate the performance of the approximation of the different transformations presented in \S\ref{sec:verification}, we conduct experiments based on different distributions of the input vector of independent Gaussian random variables $\bm{Z}$, where $\bm{Z} \sim\mathcal{N}(\bm{z};\bm{\mu}_{\bm{Z}},\bm{\Sigma}_{\bm{Z}})$ such that $\bm{z} \in \mathbb{R}^{\mathtt{K}}$ and a vector size fixed at $\mathtt{K}=10$.
+
+The variances, $\sigma_{Z_i}^2$, were defined in three categories, which are applied to all of the expected value configurations of the output vector. The small variance category corresponds to a uniform distribution $\sigma_{Z_i}^2 \sim \mathcal{U}[0.001, 0.1]$, the medium variance category uses $\sigma_{Z_i}^2 \sim \mathcal{U}[0.5, 3.0]$, and the large variance category uses $\sigma_{Z_i}^2 \sim \mathcal{U}[5.0, 10.0]$.
+
+The expected value vector $\bm{\mu}_{\mathbf{Z}}$ is configured to test a range of scenarios in combination with the variance settings described above. These configurations are designed to simulate common behaviors in the output layer of a classification model. An example of each scenario is shown in Figure~\ref{fig:scenarios_examples}.
+\begin{itemize}
+    \item Random Output Vector: This configuration simulates a typical hidden layer output. Each element $\mu_{Z_i}$ is drawn from $\mathcal{N}(0, 0.5^2)$.
+    \item Dominant Output Vector: This configuration simulates a typical output layer, with one dominant output. One expected output value is drawn from $\mathcal{U}[2.0, 4.0]$, while the other $\mathtt{K}-1$ expected output values are drawn from $\mathcal{U}[-4.0, -1.0]$.
+    \item Competing Output Vector: This configuration evaluates performance when multiple outputs are strong and competing. The number of positive outputs is randomly chosen from $\{2, 3\}$. Their expected values are drawn from $\mathcal{U}[2.0, 4.0]$, and the remaining expected output values are drawn from $\mathcal{U}[-4.0, -1.0]$.
+    \item All-Negative Output Vector: This configuration provides a baseline for the function behavior with only negative input expected values drawn from $\mathcal{U}[-4.0, -1.0]$.
+    \item Equal Positive Output Vector: This configuration tests the function behavior in a perfectly balanced, positive scenario. A base expected value is drawn from $\mathcal{U}[2.0, 4.0]$, and each expected output value is set to this base value plus a small random perturbation from $\mathcal{U}[-0.2, 0.2]$.
+\end{itemize}
+
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/input_z_configurations.pdf}
+    \caption{Examples for each experimental configuration of $Z$.}
+    \label{fig:scenarios_examples}
+\end{figure}
+
+\subsection{Extension of Quantitative Error Analysis}\label{app:extension_classes}
+We extend the qualitative error analysis from \S\ref{sec:verification} on the same input scenarios described in Appendix~\ref{app:experimental_configurations} for $\mathtt{K} = 100$ and $\mathtt{K} = 1000$ across 4,500 experiments. Figure~\ref{fig:mae_heatmaps_100_1000} shows the MAE in comparison to MC across all classes and Figure~\ref{fig:top1_mae_heatmaps_100_1000} shows the error on the TOP1 class. We see that the LL-Softmax and MM-Softmax methods tend to fail more in medium and high variance regimes, while MM-Remax stay consistent with a maximum MAE of $0.1$.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.49\linewidth]{figures/mae_combined_heatmap_100_probit.pdf}
+    \includegraphics[width=0.49\linewidth]{figures/mae_combined_heatmap_1000_probit.pdf}
+    \caption{Mean Absolute Error of the output moments ($\bm{\mu_A}$ and $\bm{\sigma}_{\bm{A}}^2$) and correlation coefficients relative to MC ground truth. Darker regions indicate lower error for the different proposed methods.}
+    \label{fig:mae_heatmaps_100_1000}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.49\linewidth]{figures/mae_combined_heatmap_100_probit_top1.pdf}
+    \includegraphics[width=0.49\linewidth]{figures/mae_combined_heatmap_1000_probit_top1.pdf}
+    \caption{Mean Absolute Error of the top 1 class output moments ($\bm{\mu}_{\bm{A}_{\text{TOP1}}}$ and $\bm{\sigma}_{\bm{A}_{\text{TOP1}}}^2$) and correlation coefficients relative to MC ground truth. Darker regions indicate lower error for the different proposed methods.}
+    \label{fig:top1_mae_heatmaps_100_1000}
+\end{figure}
+
+\end{document}

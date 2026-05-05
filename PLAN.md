@@ -181,7 +181,81 @@ in `__init__.py`.
 
 ---
 
-## 8. Scope Changes
+## 8. Commit Conventions
+
+Lightweight, Conventional-Commits-inspired. The point is filterable history,
+not ceremony — when in doubt prefer a clear subject over the perfect prefix.
+
+**Subject line** — `<type>: <imperative summary>`, ≤72 chars, sentence case.
+
+| Type | Use for |
+|---|---|
+| `feat` | New layer, kernel, example, public API |
+| `fix` | Bug fix that doesn't change scope or interface |
+| `perf` | Speed/memory change with no semantic difference |
+| `parity` | cuTAGI parity work (tolerance fix, reference alignment, MixtureReLU-style maths). Project-specific because parity is load-bearing here |
+| `refactor` | Rename / restructure without behaviour change |
+| `docs` | PLAN.md, README, docstrings, comments |
+| `test` | Test-only change (add/remove/repair). Test-supporting fixtures count |
+| `chore` | Version bump, dep bump, archive moves, formatter runs |
+
+**Body** (optional but encouraged when the change isn't self-explanatory):
+
+- Blank line after subject, wrap at 72.
+- Explain **why**, not what — the diff already shows what.
+- Note any non-obvious choices (e.g. "kept allow_tf32=False because TF32
+  breaks the 1e-4 cuTAGI variance tolerance").
+- For `parity` commits, say which cuTAGI source file/branch the fix targets.
+
+**Footer**:
+
+- Reference issues with `Refs: #N` or `Fixes: #N` if any exist.
+- No `Co-Authored-By:` lines for AI-assisted commits — assume AI assistance
+  is the default and skip the noise.
+
+**Versioning**:
+
+- Bump `pyproject.toml` version on user-visible API changes (new public
+  layer/export, removed export, changed signature). Pure-internal perf or
+  refactor doesn't need a bump.
+- Bump commit gets its own `chore: bump version 0.X.Y → 0.X.Y+1` and is
+  tagged `git tag v0.X.Y && git push --tags`.
+- Update both `pyproject.toml` and `triton_tagi/__init__.py` `__version__`
+  in the same commit; they must agree.
+
+**Examples**:
+
+```
+feat: add MultiheadAttentionV2 with separate Q/K/V projections
+
+Mirrors cuTAGI's attention.cpp on feat/attn-debug. Bayesian Q·Kᵀ uses
+the fused bmm_tagi_var kernel; backward fuses the four δQ/δK/δV/δscore
+reductions through bmm_shared_{left,right}.
+```
+
+```
+parity: fix Remax to use MixtureReLU + log-normal cov path
+
+cuTAGI computes Remax via MixtureReLU moments and log-normal identities,
+not the Softplus + Taylor approximation we had. Variance from the old
+path was off by ~5e-4 which fails test_remax_parity at atol=1e-4.
+
+Refs: cuTAGI src/output_layer_cpu.cpp::Remax
+```
+
+```
+perf: drop @triton.autotune from kernels/attention.py
+
+Autotune adds ~50-100µs of Python dispatch per call even on cache hits,
+which dominated reverse_predictor's small attention shapes (S=8, D=32).
+Replaced with a shape-adaptive _pick_blocks heuristic. Per-call 17-24%
+faster; MHA forward 5.6% faster end-to-end. All 18 attention validation
+tests pass.
+```
+
+---
+
+## 9. Scope Changes
 
 Last touched **2026-04-23**: documented `kernels/attention.py` and
 `bench_attention.py`; archived `_diag_*.py` investigation scripts to
