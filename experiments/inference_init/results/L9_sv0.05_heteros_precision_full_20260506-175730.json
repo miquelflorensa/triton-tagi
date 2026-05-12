@@ -1,0 +1,174 @@
+{
+  "depth": 9,
+  "hidden": 256,
+  "sigma_v": 0.05,
+  "head": "heteros",
+  "heteros_gain": 0.1,
+  "target_scale": 3.0,
+  "update_mode": "precision",
+  "rho_mode": "full",
+  "n_epochs": 20,
+  "batch_size": 512,
+  "seed": 42,
+  "sigma_m_vals": [
+    0.25,
+    0.5,
+    1.0
+  ],
+  "sigma_z_vals": [
+    0.25,
+    0.5,
+    1.0
+  ],
+  "he_baseline": {
+    "best_acc": 0.098,
+    "final_acc": 0.098,
+    "per_epoch_acc": [
+      0.098
+    ],
+    "diverged": true
+  },
+  "ibi_runs": [
+    {
+      "sigma_m": 0.25,
+      "sigma_z": 0.25,
+      "best_acc": 0.098,
+      "final_acc": 0.098,
+      "per_epoch_acc": [
+        0.098
+      ],
+      "diverged": true
+    },
+    {
+      "sigma_m": 0.25,
+      "sigma_z": 0.5,
+      "best_acc": 0.098,
+      "final_acc": 0.098,
+      "per_epoch_acc": [
+        0.098
+      ],
+      "diverged": true
+    },
+    {
+      "sigma_m": 0.25,
+      "sigma_z": 1.0,
+      "best_acc": 0.098,
+      "final_acc": 0.098,
+      "per_epoch_acc": [
+        0.098
+      ],
+      "diverged": true
+    },
+    {
+      "sigma_m": 0.5,
+      "sigma_z": 0.25,
+      "best_acc": 0.098,
+      "final_acc": 0.098,
+      "per_epoch_acc": [
+        0.098
+      ],
+      "diverged": true
+    },
+    {
+      "sigma_m": 0.5,
+      "sigma_z": 0.5,
+      "best_acc": 0.098,
+      "final_acc": 0.098,
+      "per_epoch_acc": [
+        0.098
+      ],
+      "diverged": true
+    },
+    {
+      "sigma_m": 0.5,
+      "sigma_z": 1.0,
+      "best_acc": 0.098,
+      "final_acc": 0.098,
+      "per_epoch_acc": [
+        0.098
+      ],
+      "diverged": true
+    },
+    {
+      "sigma_m": 1.0,
+      "sigma_z": 0.25,
+      "best_acc": 0.098,
+      "final_acc": 0.098,
+      "per_epoch_acc": [
+        0.098
+      ],
+      "diverged": true
+    },
+    {
+      "sigma_m": 1.0,
+      "sigma_z": 0.5,
+      "best_acc": 0.098,
+      "final_acc": 0.098,
+      "per_epoch_acc": [
+        0.098
+      ],
+      "diverged": true
+    },
+    {
+      "sigma_m": 1.0,
+      "sigma_z": 1.0,
+      "best_acc": 0.098,
+      "final_acc": 0.098,
+      "per_epoch_acc": [
+        0.098
+      ],
+      "diverged": true
+    }
+  ],
+  "grid_best_acc": [
+    [
+      0.098,
+      0.098,
+      0.098
+    ],
+    [
+      0.098,
+      0.098,
+      0.098
+    ],
+    [
+      0.098,
+      0.098,
+      0.098
+    ]
+  ],
+  "grid_final_acc": [
+    [
+      0.098,
+      0.098,
+      0.098
+    ],
+    [
+      0.098,
+      0.098,
+      0.098
+    ],
+    [
+      0.098,
+      0.098,
+      0.098
+    ]
+  ],
+  "grid_diverged": [
+    [
+      true,
+      true,
+      true
+    ],
+    [
+      true,
+      true,
+      true
+    ],
+    [
+      true,
+      true,
+      true
+    ]
+  ]
+}

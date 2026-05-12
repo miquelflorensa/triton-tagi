@@ -34,6 +34,7 @@ from triton_tagi import (
     ReLU,
     Remax,
     Sequential,
+    inference_init,
 )
 from triton_tagi.checkpoint import RunDir
 
@@ -256,6 +257,11 @@ def main(
     gain_b: float = 0.1,
     pool: str = "avg",
     augment: bool = True,
+    use_bn: bool = True,
+    ibi: bool = False,
+    sigma_m: float = 0.5,
+    sigma_z: str = "0.5",
+    ibi_batches: int = 0,
     data_dir: str = "data",
     checkpoint_interval: int = 10,
     seed: int = 42,
@@ -288,7 +294,7 @@ def main(
     print(f"  Train: {x_train.shape[0]:,}  |  Test: {x_test.shape[0]:,}")
     print(f"  Input shape: {tuple(x_train.shape[1:])}")
 
-    arch_tag = f"cnn3_bn_{pool}"
+    arch_tag = f"cnn3_{'bn' if use_bn else 'nobn'}_{pool}"
 
     # ── Config ──
     config: dict = {
@@ -302,6 +308,10 @@ def main(
         "gain_b": gain_b,
         "pool": pool,
         "augment": augment,
+        "ibi": ibi,
+        "sigma_m": sigma_m if ibi else None,
+        "sigma_z": sigma_z if ibi else None,
+        "ibi_batches": ibi_batches if ibi else None,
         "checkpoint_interval": checkpoint_interval,
         "seed": seed,
         "device": device,
@@ -321,8 +331,9 @@ def main(
         block = [
             Conv2D(in_c, out_c, 5, stride=stride, padding=2, **kw),
             ReLU(),
-            BatchNorm2D(out_c, **kw),
         ]
+        if use_bn:
+            block.append(BatchNorm2D(out_c, **kw))
         if pool == "avg":
             block.append(AvgPool2D(2))
         return block
@@ -347,6 +358,24 @@ def main(
         f"  |  augment: {augment}"
     )
 
+    # ── IBI calibration (optional) ──
+    if ibi:
+        n_batches = ibi_batches if ibi_batches > 0 else len(x_train) // batch_size
+        sz_arg: float | str = "auto" if sigma_z == "auto" else float(sigma_z)
+        print(
+            f"\n  IBI calibration: σ_M={sigma_m}  σ_Z={sz_arg}  "
+            f"|  {n_batches} batches × {batch_size}"
+        )
+        t0 = time.perf_counter()
+        loader = (x_train[i * batch_size : (i + 1) * batch_size] for i in range(n_batches))
+        inference_init(net, loader, sigma_m=sigma_m, sigma_z=sz_arg)
+        if dev.type == "cuda":
+            torch.cuda.synchronize()
+        print(f"  IBI complete in {time.perf_counter() - t0:.2f}s")
+        # Sanity check: pre-training accuracy under IBI'd parameters
+        pre_acc, pre_ece = evaluate(net, x_test, y_test_labels)
+        print(f"  Pre-train test acc: {pre_acc * 100:.2f}%  ECE: {pre_ece:.4f}")
+
     # ── Train ──
     best_acc = train(
         net, x_train, y_train_oh, y_train_labels, x_test, y_test_labels,
@@ -370,8 +399,20 @@ if __name__ == "__main__":
     parser.add_argument("--gain_b", type=float, default=0.1)
     parser.add_argument("--pool", choices=["avg", "stride"], default="avg",
                         help="Downsample: avg (AvgPool2D k=2) or stride (stride-2 conv)")
+    parser.add_argument("--no_bn", dest="use_bn", action="store_false",
+                        help="Drop BatchNorm2D from each conv block")
+    parser.set_defaults(use_bn=True)
     parser.add_argument("--no_augment", dest="augment", action="store_false",
                         help="Disable GPU augmentation")
+    parser.add_argument("--ibi", action="store_true",
+                        help="Run inference-based initialization before training")
+    parser.add_argument("--sigma_m", type=float, default=0.5,
+                        help="IBI prior mean-scale (only used if --ibi)")
+    parser.add_argument("--sigma_z", type=str, default="0.5",
+                        help="IBI prior activation-scale: float or 'auto' "
+                             "(per-layer probe-derived; only used if --ibi)")
+    parser.add_argument("--ibi_batches", type=int, default=0,
+                        help="Number of batches for IBI; 0 = full epoch (only used if --ibi)")
     parser.add_argument("--data_dir", type=str, default="data")
     parser.add_argument("--checkpoint_interval", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)

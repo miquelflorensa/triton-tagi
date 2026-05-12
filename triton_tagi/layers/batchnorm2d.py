@@ -281,6 +281,12 @@ class BatchNorm2D(LearnableLayer):
         self.running_mean = torch.zeros(num_features, device=self.device)
         self.running_var = torch.ones(num_features, device=self.device)
 
+        # IBI mode: when True, forward uses batch stats but skips both
+        # running-stat updates and the data-dep gamma init. inference_init
+        # toggles this on for the calibration loop, then off for a final
+        # warm-up pass that populates running stats from the calibrated forward.
+        self._ibi_mode = False
+
         # --- Saved for backward ---
         self.m_hat = None
         self.S_hat = None
@@ -385,7 +391,14 @@ class BatchNorm2D(LearnableLayer):
 
         # During training: normalize with current batch stats (matching cuTAGI).
         # During eval: normalize with accumulated running stats.
-        if self.training:
+        # IBI mode: like training (batch stats), but don't touch running stats
+        # or fire the data-dep gamma init — inference_init will populate
+        # running stats with a clean warm-up after calibration.
+        if self._ibi_mode:
+            batch_mean, batch_var = self._compute_batch_stats(mz, Sz)
+            norm_mean = batch_mean
+            norm_var = batch_var
+        elif self.training:
             batch_mean, batch_var = self._compute_batch_stats(mz, Sz)
             self._update_running_stats(batch_mean, batch_var)
             norm_mean = batch_mean

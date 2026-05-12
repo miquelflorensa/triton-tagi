@@ -1,0 +1,99 @@
+{
+  "depth": 1,
+  "hidden": 256,
+  "sigma_v": 0.05,
+  "head": "heteros",
+  "heteros_gain": 0.1,
+  "target_scale": 3.0,
+  "n_epochs": 1,
+  "batch_size": 512,
+  "seed": 42,
+  "sigma_m_vals": [
+    0.5,
+    1.0
+  ],
+  "sigma_z_vals": [
+    0.5,
+    1.0
+  ],
+  "he_baseline": {
+    "best_acc": 0.9029,
+    "final_acc": 0.9029,
+    "per_epoch_acc": [
+      0.9029
+    ],
+    "diverged": false
+  },
+  "ibi_runs": [
+    {
+      "sigma_m": 0.5,
+      "sigma_z": 0.5,
+      "best_acc": 0.8808,
+      "final_acc": 0.8808,
+      "per_epoch_acc": [
+        0.8808
+      ],
+      "diverged": false
+    },
+    {
+      "sigma_m": 0.5,
+      "sigma_z": 1.0,
+      "best_acc": 0.7897,
+      "final_acc": 0.7897,
+      "per_epoch_acc": [
+        0.7897
+      ],
+      "diverged": false
+    },
+    {
+      "sigma_m": 1.0,
+      "sigma_z": 0.5,
+      "best_acc": 0.893,
+      "final_acc": 0.893,
+      "per_epoch_acc": [
+        0.893
+      ],
+      "diverged": false
+    },
+    {
+      "sigma_m": 1.0,
+      "sigma_z": 1.0,
+      "best_acc": 0.7759,
+      "final_acc": 0.7759,
+      "per_epoch_acc": [
+        0.7759
+      ],
+      "diverged": false
+    }
+  ],
+  "grid_best_acc": [
+    [
+      0.8808,
+      0.7897
+    ],
+    [
+      0.893,
+      0.7759
+    ]
+  ],
+  "grid_final_acc": [
+    [
+      0.8808,
+      0.7897
+    ],
+    [
+      0.893,
+      0.7759
+    ]
+  ],
+  "grid_diverged": [
+    [
+      false,
+      false
+    ],
+    [
+      false,
+      false
+    ]
+  ]
+}

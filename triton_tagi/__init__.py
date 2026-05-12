@@ -58,6 +58,8 @@ from .layers import (
     ResBlock,
 )
 from .network import Sequential
+from .update.observation import compute_innovation_remax_cat
+from .update.parameters import update_parameters_precision
 from .param_init import (
     gaussian_param_init,
     he_init,
@@ -108,4 +110,7 @@ __all__ = [
     # Run management
     "RunDir",
     "load_model",
+    # Update rules
+    "update_parameters_precision",
+    "compute_innovation_remax_cat",
 ]

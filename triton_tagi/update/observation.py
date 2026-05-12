@@ -164,6 +164,80 @@ def compute_innovation(y, y_pred_mu, y_pred_var, sigma_v):
 
 
 # ======================================================================
+#  Categorical-Remax diagonal innovation (no sigma_v)
+# ======================================================================
+
+
+@triton.jit
+def _output_innovation_kernel_remax_cat(
+    y_ptr,
+    ym_ptr,
+    yS_ptr,
+    dm_ptr,
+    dS_ptr,
+    eps,
+    n_elements,
+    BLOCK: tl.constexpr,
+):
+    """
+    Diagonal categorical-Remax innovation.
+
+    Observation variance = S_A + mu_A * (1 - mu_A).
+    The Bernoulli term is the aleatoric uncertainty of a probability prediction;
+    it auto-scales the signal without a sigma_v hyperparameter.
+
+    Targets y are one-hot {0, 1}, not ±1.
+    """
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    valid = offs < n_elements
+
+    y   = tl.load(y_ptr  + offs, mask=valid)
+    mu  = tl.load(ym_ptr + offs, mask=valid)
+    var = tl.load(yS_ptr + offs, mask=valid)
+
+    # Clamp mu to (eps, 1-eps) so Bernoulli term is well-defined.
+    mu_c = tl.minimum(tl.maximum(mu, eps), 1.0 - eps)
+    sigma2_y = tl.maximum(var + mu_c * (1.0 - mu_c), eps)
+
+    tl.store(dm_ptr + offs, (y - mu_c) / sigma2_y, mask=valid)
+    tl.store(dS_ptr + offs, -1.0       / sigma2_y, mask=valid)
+
+
+def compute_innovation_remax_cat(y, y_pred_mu, y_pred_var, eps: float = 1e-10):
+    """
+    Diagonal categorical-Remax output innovation (no sigma_v required).
+
+    Uses:
+        sigma²_Yi = S_Ai + mu_Ai * (1 - mu_Ai)
+
+    This is a diagonal approximation to the full categorical covariance
+    diag(A) - A A^T; off-diagonal terms are discarded.
+
+    Parameters
+    ----------
+    y          : Tensor (B, K)  one-hot targets in {0, 1}
+    y_pred_mu  : Tensor (B, K)  predicted Remax/softmax probabilities
+    y_pred_var : Tensor (B, K)  predicted variance from forward pass
+    eps        : float          numerical floor for mu clamp and sigma²
+
+    Returns
+    -------
+    delta_mu  : Tensor (B, K)
+    delta_var : Tensor (B, K)
+    """
+    n = y.numel()
+    delta_mu  = torch.empty_like(y_pred_mu)
+    delta_var = torch.empty_like(y_pred_var)
+    _output_innovation_kernel_remax_cat[(triton.cdiv(n, BLOCK),)](
+        y, y_pred_mu, y_pred_var,
+        delta_mu, delta_var,
+        eps, n, BLOCK=BLOCK,
+    )
+    return delta_mu, delta_var
+
+
+# ======================================================================
 #  Sparse (hierarchical softmax) output innovation
 # ======================================================================
 

@@ -126,3 +126,95 @@ def update_parameters(m, S, delta_m, delta_S, cap_factor):
         n,
         BLOCK=BLOCK,
     )
+
+
+# ======================================================================
+#  Precision-space parameter update
+# ======================================================================
+
+
+@triton.jit
+def _precision_param_update_kernel(
+    m_ptr,
+    S_ptr,
+    dm_ptr,
+    dS_ptr,
+    rho,
+    chi_max,
+    variance_floor,
+    n_elements,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    valid = offs < n_elements
+
+    m = tl.load(m_ptr + offs, mask=valid)
+    S = tl.load(S_ptr + offs, mask=valid)
+    dm = tl.load(dm_ptr + offs, mask=valid)
+    dS = tl.load(dS_ptr + offs, mask=valid)
+
+    S_safe = tl.maximum(S, variance_floor)
+
+    # dS <= 0 for a proper Bayesian variance update.
+    # Positive dS (variance inflation) is treated as zero information;
+    # inflation should be added explicitly as process noise, not here.
+    # chi_max bounds the per-parameter information ratio, preventing
+    # conv layers from collapsing Sw due to spatial summation in grad_Sw.
+    info = tl.minimum(tl.maximum(-dS / S_safe, 0.0), chi_max)
+    d = 1.0 + rho * info
+
+    m_new = m + rho * dm / d
+    S_new = tl.maximum(S_safe / d, variance_floor)
+
+    tl.store(m_ptr + offs, m_new, mask=valid)
+    tl.store(S_ptr + offs, S_new, mask=valid)
+
+
+def update_parameters_precision(
+    m,
+    S,
+    delta_m,
+    delta_S,
+    rho: float = 1.0,
+    chi_max: float = 1e9,
+    variance_floor: float = 1e-10,
+):
+    """
+    In-place precision-space Bayesian parameter update.
+
+    Replaces the cap-factor heuristic with the exact local Gaussian
+    batch posterior:
+
+        info  = min(max(-delta_S / S, 0), chi_max)
+        d     = 1 + rho * info
+        m_new = m + rho * delta_m / d
+        S_new = S / d
+
+    chi_max bounds the per-parameter information ratio. For MLP layers
+    it is rarely needed (set to 1e9 ≈ inf by default). For CNN layers
+    grad_Sw sums over B×H×W spatial positions, so chi_max prevents
+    early conv layers from consuming all their variance in one step.
+
+    Parameters
+    ----------
+    m              : Tensor  parameter means     (modified in-place)
+    S              : Tensor  parameter variances (modified in-place)
+    delta_m        : Tensor  mean deltas     (Sw * grad_m from backward)
+    delta_S        : Tensor  variance deltas (Sw² * grad_S from backward)
+    rho            : float   tempering ∈ (0, 1]       (default 1.0)
+    chi_max        : float   max information ratio     (default 1e9 ≈ inf)
+    variance_floor : float   numerical floor for S     (default 1e-10)
+    """
+    n = m.numel()
+    _precision_param_update_kernel[(triton.cdiv(n, BLOCK),)](
+        m.view(-1),
+        S.view(-1),
+        delta_m.view(-1),
+        delta_S.view(-1),
+        rho,
+        chi_max,
+        variance_floor,
+        n,
+        BLOCK=BLOCK,
+    )

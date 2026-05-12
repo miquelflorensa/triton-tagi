@@ -20,7 +20,18 @@ from __future__ import annotations
 import pytest
 import torch
 
-from triton_tagi import Flatten, Linear, ReLU, Remax, Sequential, inference_init
+from triton_tagi import (
+    AvgPool2D,
+    BatchNorm2D,
+    Conv2D,
+    Flatten,
+    Linear,
+    ReLU,
+    Remax,
+    ResBlock,
+    Sequential,
+    inference_init,
+)
 from triton_tagi.inference_init import (
     _decoupled_inverse,
     _layer_targets,
@@ -286,3 +297,189 @@ class TestInferenceInitEndToEnd:
         assert torch.isfinite(mu).all()
         assert torch.isfinite(var).all()
         assert torch.all(var >= 0)
+
+
+# ---------------------------------------------------------------------------
+#  Conv2D / BatchNorm2D / ResBlock — Phase 2 + Phase 3 (PLAN.md)
+# ---------------------------------------------------------------------------
+
+
+class TestConv2D:
+    def test_single_conv_hits_S(self):
+        """Conv2D calibrated standalone: S target hit exactly (per-channel
+        scalars aggregated over N*H_out*W_out spatial positions)."""
+        torch.manual_seed(70)
+        N, C_in, H, C_out = 32, 3, 16, 16
+        sigma_m, sigma_z = 0.5, 0.5
+        net = Sequential(
+            [Conv2D(C_in, C_out, 3, padding=1, device=DEVICE)], device=DEVICE
+        )
+        x = torch.randn(N, C_in, H, H, device=DEVICE)
+        inference_init(net, [x], sigma_m, sigma_z)
+
+        net.eval()
+        mz, Sz = net.forward(x)
+        # Aggregate to per-channel (C_out,) batch-mean — same convention as
+        # inference_init internals.
+        mu_Z = mz.permute(0, 2, 3, 1).reshape(-1, C_out).mean(0)
+        S_Z = Sz.permute(0, 2, 3, 1).reshape(-1, C_out).mean(0)
+        torch.testing.assert_close(
+            mu_Z.sum(), torch.tensor(0.0, device=DEVICE), atol=5e-3, rtol=0
+        )
+        torch.testing.assert_close(
+            S_Z.sum(),
+            torch.tensor(C_out * sigma_z**2, device=DEVICE),
+            atol=0.0,
+            rtol=2e-2,
+        )
+
+    def test_cnn_calibrates_and_runs(self):
+        """End-to-end CNN: Conv→ReLU→Pool→Conv→ReLU→Pool→Flatten→Linear."""
+        torch.manual_seed(71)
+        N = 64
+        net = Sequential(
+            [
+                Conv2D(3, 16, 3, padding=1, device=DEVICE), ReLU(), AvgPool2D(2),
+                Conv2D(16, 32, 3, padding=1, device=DEVICE), ReLU(), AvgPool2D(2),
+                Flatten(),
+                Linear(32 * 8 * 8, 10, device=DEVICE),
+            ],
+            device=DEVICE,
+        )
+        loader = [torch.randn(N, 3, 32, 32, device=DEVICE) for _ in range(2)]
+        inference_init(net, loader, sigma_m=0.5, sigma_z=0.5)
+        net.eval()
+        mu, var = net.forward(loader[0])
+        assert torch.isfinite(mu).all()
+        assert torch.isfinite(var).all()
+        assert (var >= 0).all()
+
+
+class TestBatchNorm2D:
+    def test_bn_passthrough(self):
+        """BN's gamma/beta must not be modified by IBI (pass-through layer).
+        Conv2D before the BN must still calibrate normally."""
+        torch.manual_seed(80)
+        N, C, H = 32, 16, 8
+        sigma_m, sigma_z = 0.5, 0.5
+        net = Sequential(
+            [
+                Conv2D(3, C, 3, padding=1, device=DEVICE),
+                BatchNorm2D(C, device=DEVICE, preserve_var=False),
+            ],
+            device=DEVICE,
+        )
+        bn = net.layers[1]
+        mw_before = bn.mw.clone()
+        mb_before = bn.mb.clone()
+        Sw_before = bn.Sw.clone()
+        Sb_before = bn.Sb.clone()
+
+        x = torch.randn(N, 3, H, H, device=DEVICE)
+        inference_init(net, [x], sigma_m, sigma_z)
+
+        # BN parameters unchanged.
+        torch.testing.assert_close(bn.mw, mw_before)
+        torch.testing.assert_close(bn.mb, mb_before)
+        torch.testing.assert_close(bn.Sw, Sw_before)
+        torch.testing.assert_close(bn.Sb, Sb_before)
+
+        # Conv2D calibration still produces a finite forward.
+        net.train()
+        mu, var = net.forward(x)
+        assert torch.isfinite(mu).all()
+        assert torch.isfinite(var).all()
+
+
+class TestResBlock:
+    def test_resblock_calibrates_subllayers(self):
+        """ResBlock: per-sub-layer calibration leaves Conv1/Conv2/BN1/BN2/proj
+        with modified parameters and produces a finite output."""
+        torch.manual_seed(90)
+        N = 32
+        net = Sequential(
+            [
+                Conv2D(3, 16, 3, padding=1, device=DEVICE),
+                ReLU(),
+                BatchNorm2D(16, device=DEVICE, preserve_var=False),
+                ResBlock(16, 32, stride=2, device=DEVICE),  # projection branch
+                ResBlock(32, 32, stride=1, device=DEVICE),  # identity branch
+                AvgPool2D(2),
+                Flatten(),
+                Linear(32 * 8 * 8, 10, device=DEVICE),
+            ],
+            device=DEVICE,
+        )
+        block = net.layers[3]
+        # Conv sub-layers should change (calibrated); BN sub-layers are
+        # pass-through and must remain unchanged.
+        changed = {
+            "conv1_mw": block.conv1.mw.clone(),
+            "conv2_mw": block.conv2.mw.clone(),
+            "proj_conv_mw": block.proj_conv.mw.clone(),
+        }
+        unchanged = {
+            "bn1_mw": block.bn1.mw.clone(),
+            "bn2_mw": block.bn2.mw.clone(),
+            "proj_bn_mw": block.proj_bn.mw.clone(),
+        }
+        loader = [torch.randn(N, 3, 32, 32, device=DEVICE) for _ in range(2)]
+        inference_init(net, loader, sigma_m=0.5, sigma_z=0.5)
+
+        for name, snap in changed.items():
+            cur = {
+                "conv1_mw": block.conv1.mw,
+                "conv2_mw": block.conv2.mw,
+                "proj_conv_mw": block.proj_conv.mw,
+            }[name]
+            assert not torch.allclose(cur, snap), f"{name} unchanged but should be calibrated"
+
+        for name, snap in unchanged.items():
+            cur = {
+                "bn1_mw": block.bn1.mw,
+                "bn2_mw": block.bn2.mw,
+                "proj_bn_mw": block.proj_bn.mw,
+            }[name]
+            torch.testing.assert_close(cur, snap)
+
+        net.eval()
+        mu, var = net.forward(loader[0])
+        assert torch.isfinite(mu).all()
+        assert torch.isfinite(var).all()
+        assert (var >= 0).all()
+
+    def test_resnet18_full(self):
+        """Smoke: full CIFAR-10 ResNet18 architecture calibrates without error."""
+        torch.manual_seed(91)
+        kw = {"device": DEVICE, "gain_w": 0.1, "gain_b": 0.1}
+        net = Sequential(
+            [
+                Conv2D(3, 64, 3, stride=1, padding=1, **kw),
+                ReLU(),
+                BatchNorm2D(64, **kw),
+                ResBlock(64, 64, stride=1, **kw),
+                ResBlock(64, 64, stride=1, **kw),
+                ResBlock(64, 128, stride=2, **kw),
+                ResBlock(128, 128, stride=1, **kw),
+                ResBlock(128, 256, stride=2, **kw),
+                ResBlock(256, 256, stride=1, **kw),
+                ResBlock(256, 512, stride=2, **kw),
+                ResBlock(512, 512, stride=1, **kw),
+                AvgPool2D(4),
+                Flatten(),
+                Linear(512, 10, **kw),
+                Remax(),
+            ],
+            device=DEVICE,
+        )
+        loader = [torch.randn(16, 3, 32, 32, device=DEVICE) for _ in range(2)]
+        inference_init(net, loader, sigma_m=0.5, sigma_z=0.5)
+        net.eval()
+        mu, var = net.forward(loader[0])
+        assert torch.isfinite(mu).all()
+        assert torch.isfinite(var).all()
+        # Remax row-sum is 1.
+        torch.testing.assert_close(
+            mu.sum(dim=1), torch.ones(loader[0].shape[0], device=DEVICE),
+            atol=1e-4, rtol=0,
+        )

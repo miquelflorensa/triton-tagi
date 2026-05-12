@@ -31,7 +31,7 @@ from pathlib import Path
 import torch
 from torchvision import datasets
 
-from triton_tagi import Linear, ReLU, Sequential, inference_init
+from triton_tagi import EvenSoftplus, Linear, ReLU, Remax, Sequential, inference_init
 
 HERE = Path(__file__).resolve().parent
 FIGURES = HERE / "figures"
@@ -45,7 +45,7 @@ RESULTS.mkdir(exist_ok=True)
 # ---------------------------------------------------------------------------
 
 
-def load_mnist(data_dir: str, device: torch.device):
+def load_mnist(data_dir: str, device: torch.device, target_scale: float = 1.0):
     train_ds = datasets.MNIST(data_dir, train=True, download=True)
     test_ds = datasets.MNIST(data_dir, train=False, download=True)
 
@@ -58,9 +58,16 @@ def load_mnist(data_dir: str, device: torch.device):
     y_train_labels = train_ds.targets.to(device)
     y_test_labels = test_ds.targets.to(device)
 
+    # Standard one-hot (for Remax / plain heads)
     y_train_oh = torch.zeros(len(y_train_labels), 10, device=device)
     y_train_oh.scatter_(1, y_train_labels.unsqueeze(1), 1.0)
-    return x_train, y_train_oh, x_test, y_test_labels
+
+    # +/-C targets for TAGI-V heteros head
+    C = target_scale
+    y_train_pm = torch.full((len(y_train_labels), 10), -C, device=device)
+    y_train_pm.scatter_(1, y_train_labels.unsqueeze(1), C)
+
+    return x_train, y_train_oh, y_train_pm, x_test, y_test_labels
 
 
 # ---------------------------------------------------------------------------
@@ -68,8 +75,9 @@ def load_mnist(data_dir: str, device: torch.device):
 # ---------------------------------------------------------------------------
 
 
-def build_mlp(depth: int, hidden: int, device: torch.device) -> Sequential:
-    """Construct a depth-L MLP: 784 → [hidden] * depth → 10 with ReLU activations."""
+def build_mlp(depth: int, hidden: int, device: torch.device,
+              update_mode: str = "cap", rho_mode: str = "full") -> Sequential:
+    """Construct a depth-L MLP: 784 -> [hidden]*depth -> 10 with ReLU activations."""
     layers: list = []
     in_feat = 784
     for _ in range(depth):
@@ -77,7 +85,26 @@ def build_mlp(depth: int, hidden: int, device: torch.device) -> Sequential:
         layers.append(ReLU())
         in_feat = hidden
     layers.append(Linear(in_feat, 10, device=device))
-    return Sequential(layers, device=device)
+    return Sequential(layers, device=device, update_mode=update_mode, rho_mode=rho_mode)
+
+
+def build_mlp_heteros(depth: int, hidden: int, device: torch.device,
+                      gain: float = 0.1,
+                      update_mode: str = "cap", rho_mode: str = "full") -> Sequential:
+    """Construct a depth-L MLP for TAGI-V: 784 -> [hidden]*depth -> 20 + EvenSoftplus.
+
+    gain=0.1 (small init) is required to prevent noise-head explosion that occurs
+    with gain=1.0 due to shared hidden-layer growth during mean-head training.
+    """
+    layers: list = []
+    in_feat = 784
+    for _ in range(depth):
+        layers.append(Linear(in_feat, hidden, device=device, gain_w=gain, gain_b=gain))
+        layers.append(ReLU())
+        in_feat = hidden
+    layers.append(Linear(in_feat, 20, device=device, gain_w=gain, gain_b=gain))
+    layers.append(EvenSoftplus(half_width=10))
+    return Sequential(layers, device=device, update_mode=update_mode, rho_mode=rho_mode)
 
 
 def batch_iter(x: torch.Tensor, batch_size: int):
@@ -90,6 +117,7 @@ def evaluate(
     net: Sequential,
     x_test: torch.Tensor,
     y_labels: torch.Tensor,
+    heteros: bool = False,
     batch_size: int = 1024,
 ) -> float:
     net.eval()
@@ -97,7 +125,12 @@ def evaluate(
     with torch.no_grad():
         for i in range(0, len(x_test), batch_size):
             mu, _ = net.forward(x_test[i : i + batch_size])
-            correct += (mu.argmax(dim=1) == y_labels[i : i + batch_size]).sum().item()
+            if heteros:
+                # mean heads are even columns: 0, 2, ..., 18
+                preds = mu[:, 0::2].argmax(dim=1)
+            else:
+                preds = mu.argmax(dim=1)
+            correct += (preds == y_labels[i : i + batch_size]).sum().item()
     net.train()
     return correct / len(x_test)
 
@@ -111,16 +144,32 @@ def train_run(
     sigma_z: float | None,
     x_train: torch.Tensor,
     y_train_oh: torch.Tensor,
+    y_train_pm: torch.Tensor,
     x_test: torch.Tensor,
     y_test_labels: torch.Tensor,
     n_epochs: int,
     batch_size: int,
     seed: int,
     device: torch.device,
+    head: str = "none",
+    heteros_gain: float = 0.1,
+    update_mode: str = "cap",
+    rho_mode: str = "full",
 ) -> dict:
-    """Single training run. Returns {best_acc, final_acc, diverged, per_epoch_acc}."""
+    """Single training run. Returns {best_acc, final_acc, diverged, per_epoch_acc}.
+
+    head: "none" (plain 10-output), "remax", or "heteros" (TAGI-V, 20 outputs).
+    """
     torch.manual_seed(seed)
-    net = build_mlp(depth, hidden, device)
+    heteros = head == "heteros"
+    if heteros:
+        net = build_mlp_heteros(depth, hidden, device, gain=heteros_gain,
+                                update_mode=update_mode, rho_mode=rho_mode)
+        y_train = y_train_pm
+    else:
+        net = build_mlp(depth, hidden, device,
+                        update_mode=update_mode, rho_mode=rho_mode)
+        y_train = y_train_oh
 
     if ibi:
         assert sigma_m is not None and sigma_z is not None
@@ -132,11 +181,11 @@ def train_run(
     diverged = False
     for epoch in range(1, n_epochs + 1):
         perm = torch.randperm(x_train.size(0), device=device)
-        x_s, y_s = x_train[perm], y_train_oh[perm]
+        x_s, y_s = x_train[perm], y_train[perm]
         for i in range(0, len(x_s), batch_size):
             net.step(x_s[i : i + batch_size], y_s[i : i + batch_size], sigma_v)
 
-        acc = evaluate(net, x_test, y_test_labels)
+        acc = evaluate(net, x_test, y_test_labels, heteros=heteros)
         per_epoch.append(acc)
         best_acc = max(best_acc, acc)
         if not torch.isfinite(net.forward(x_test[:1])[0]).all():
@@ -258,24 +307,36 @@ def sweep(
     data: tuple,
     device: torch.device,
     stamp: str,
+    head: str = "none",
+    heteros_gain: float = 0.1,
+    target_scale: float = 3.0,
+    update_mode: str = "cap",
+    rho_mode: str = "full",
 ) -> dict:
-    """Run He baseline + (σ_M, σ_Z) grid for one depth. Return full result dict."""
-    x_train, y_train_oh, x_test, y_test_labels = data
+    """Run He baseline + (sigma_M, sigma_Z) grid for one depth. Return full result dict."""
+    x_train, y_train_oh, y_train_pm, x_test, y_test_labels = data
+    heteros = head == "heteros"
     print("=" * 64)
-    print(f"  IBI sweep: depth={depth}, sigma_V={sigma_v}, epochs={n_epochs}")
+    print(f"  IBI sweep: depth={depth}, sigma_V={sigma_v}, epochs={n_epochs}, head={head}, update={update_mode}/{rho_mode}")
     print(f"  sigma_M: {sigma_m_vals}   sigma_Z: {sigma_z_vals}")
+    if heteros:
+        print(f"  TAGI-V: gain={heteros_gain}  target_scale=+/-{target_scale}")
     print("=" * 64)
 
-    # ── He baseline ──
-    t0 = time.perf_counter()
-    he = train_run(
+    common = dict(
         depth=depth, hidden=hidden, sigma_v=sigma_v,
-        ibi=False, sigma_m=None, sigma_z=None,
-        x_train=x_train, y_train_oh=y_train_oh,
-        x_test=x_test, y_test_labels=y_test_labels,
+        y_train_oh=y_train_oh, y_train_pm=y_train_pm,
+        x_train=x_train, x_test=x_test, y_test_labels=y_test_labels,
         n_epochs=n_epochs, batch_size=batch_size, seed=seed, device=device,
+        head=head, heteros_gain=heteros_gain,
+        update_mode=update_mode, rho_mode=rho_mode,
     )
-    print(f"  He baseline: best={he['best_acc']*100:6.2f}%  "
+
+    # ── He / small-gain baseline (no IBI) ──
+    t0 = time.perf_counter()
+    he = train_run(ibi=False, sigma_m=None, sigma_z=None, **common)
+    label = f"{'He' if not heteros else f'gain={heteros_gain}'} baseline"
+    print(f"  {label}: best={he['best_acc']*100:6.2f}%  "
           f"final={he['final_acc']*100:6.2f}%  "
           f"diverged={he['diverged']}  ({time.perf_counter()-t0:.1f}s)",
           flush=True)
@@ -288,18 +349,12 @@ def sweep(
     for i, sm in enumerate(sigma_m_vals):
         for j, sz in enumerate(sigma_z_vals):
             t0 = time.perf_counter()
-            r = train_run(
-                depth=depth, hidden=hidden, sigma_v=sigma_v,
-                ibi=True, sigma_m=sm, sigma_z=sz,
-                x_train=x_train, y_train_oh=y_train_oh,
-                x_test=x_test, y_test_labels=y_test_labels,
-                n_epochs=n_epochs, batch_size=batch_size, seed=seed, device=device,
-            )
+            r = train_run(ibi=True, sigma_m=sm, sigma_z=sz, **common)
             grid_best[i][j] = r["best_acc"]
             grid_final[i][j] = r["final_acc"]
             grid_diverged[i][j] = r["diverged"]
             runs.append({"sigma_m": sm, "sigma_z": sz, **r})
-            print(f"  IBI σM={sm:.2f} σZ={sz:.2f}: "
+            print(f"  IBI sM={sm:.2f} sZ={sz:.2f}: "
                   f"best={r['best_acc']*100:6.2f}%  "
                   f"final={r['final_acc']*100:6.2f}%  "
                   f"diverged={r['diverged']}  "
@@ -307,11 +362,17 @@ def sweep(
                   flush=True)
 
     # ── Save per-depth results ──
-    tag = f"L{depth}_sv{sigma_v:g}_{stamp}"
+    upd_tag = update_mode if update_mode == "cap" else f"{update_mode}_{rho_mode}"
+    tag = f"L{depth}_sv{sigma_v:g}_{head}_{upd_tag}_{stamp}"
     result = {
         "depth": depth,
         "hidden": hidden,
         "sigma_v": sigma_v,
+        "head": head,
+        "heteros_gain": heteros_gain if heteros else None,
+        "target_scale": target_scale if heteros else None,
+        "update_mode": update_mode,
+        "rho_mode": rho_mode,
         "n_epochs": n_epochs,
         "batch_size": batch_size,
         "seed": seed,
@@ -325,9 +386,10 @@ def sweep(
     }
     with open(RESULTS / f"{tag}.json", "w") as f:
         json.dump(result, f, indent=2)
+    title = f"MNIST MLP  L={depth}  sV={sigma_v}  head={head}  best acc"
     save_heatmap(
         grid_best, sigma_m_vals, sigma_z_vals,
-        title=f"MNIST MLP  L={depth}  σ_V={sigma_v}  best test acc",
+        title=title,
         out_path=FIGURES / f"heatmap_{tag}",
         he_baseline=he["best_acc"],
     )
@@ -354,10 +416,23 @@ def main() -> None:
     p.add_argument("--data_dir", type=str, default="data")
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--head", type=str, default="none",
+                   choices=["none", "remax", "heteros"],
+                   help="Output head: 'none' (plain linear), 'remax', or 'heteros' (TAGI-V).")
+    p.add_argument("--heteros_gain", type=float, default=0.1,
+                   help="gain_w=gain_b for heteros head (default 0.1).")
+    p.add_argument("--target_scale", type=float, default=3.0,
+                   help="C for +/-C targets used by heteros head (default 3.0).")
+    p.add_argument("--update_mode", type=str, default="cap",
+                   choices=["cap", "precision"],
+                   help="Parameter update rule: 'cap' (cuTAGI) or 'precision' (exact Bayesian).")
+    p.add_argument("--rho_mode", type=str, default="full",
+                   choices=["full", "sqrt_batch", "batch_avg", "custom"],
+                   help="Tempering schedule for precision update (default 'full').")
     args = p.parse_args()
 
     device = torch.device(args.device)
-    data = load_mnist(args.data_dir, device)
+    data = load_mnist(args.data_dir, device, target_scale=args.target_scale)
     stamp = time.strftime("%Y%m%d-%H%M%S")
 
     t_total = time.perf_counter()
@@ -375,6 +450,11 @@ def main() -> None:
             data=data,
             device=device,
             stamp=stamp,
+            head=args.head,
+            heteros_gain=args.heteros_gain,
+            target_scale=args.target_scale,
+            update_mode=args.update_mode,
+            rho_mode=args.rho_mode,
         )
         depth_results.append(r)
 

@@ -204,29 +204,61 @@ tests/
   × $\sigma_V \in \{0.01, 0.05\}$. Reproduce Figure 4.
 - Done when the heatmap qualitatively matches the thesis.
 
-### Phase 2 — Conv2D
+### Phase 2 — Conv2D + BatchNorm2D (implemented 2026-05-08)
 
-- Open theory question: what is "width" $A$ for Conv2D?
-  - Options: $C_{\text{out}}$ (per-channel), $C_{\text{out}} \cdot H \cdot W$
-    (full feature map), or per-spatial-position with $A = C_{\text{out}}$.
-  - Need to decide which produces stable training. Thesis flags this as
-    "remaining direction".
+**D7. Conv2D width.** $A = C_{\text{out}}$, batch-aggregate over
+$N \cdot H_{\text{out}} \cdot W_{\text{out}}$. The $C_{\text{out}}$ channels at
+one spatial position are exactly the "layer of width $A$" the algorithm
+assumes (shared weight column across positions, per-channel bias). The inverse
+update is per-output-channel — same math as Linear, with $\gamma$ broadcast as
+$(1, C_{\text{out}})$ over the patch-row axis of $\mu_W \in \mathbb{R}^{K \times C_{\text{out}}}$.
+
+The other interpretations were rejected:
+- $A = C_{\text{out}} \cdot H \cdot W$: breaks weight sharing — would require
+  per-position $\gamma$, but Conv2D has only $C_{\text{out}}$ scaling
+  parameters.
+- Per-spatial-position with $A = C_{\text{out}}$: same as the chosen
+  formulation if you batch-aggregate, just stated differently.
+
+**D8. BatchNorm2D.** Treat $\text{out} = \gamma \cdot \hat z + \beta$ as
+structurally identical to Linear/Conv2D from the inverse-update perspective:
+$A = $ num_features (= $C$), batch-aggregate over $N \cdot H \cdot W$, scale
+$\gamma$'s mean and variance by $\gamma_c$, $\gamma_c^2$ and shift $\beta$'s
+mean by $\Delta\mu_c$. Identical algebra to Linear (verified: scaling the
+scalar parameter $\mu_\gamma$ by $\gamma_{c}$ scales the output variance by
+$\gamma_c^2$).
+
+**D9. BN training mode during IBI.** Run IBI in train mode so BN computes batch
+stats (eval mode would normalize against zero-initialized running stats and
+defeat the purpose of BN). Each BN forward is called twice per batch (probe +
+re-forward), which roughly doubles the effective EMA momentum on running
+stats during IBI. Benign — running stats refresh quickly during real training.
+
 - Validate on MNIST CNN, then CIFAR-10 CNN.
 
-### Phase 3 — ResNet-18
+### Phase 3 — ResNet-18 (implemented 2026-05-08)
 
-- ResBlock has additive shortcut + two Conv2D + BN + ReLU. Two strategies:
-  - **(a) Per-conv calibration** — treat each Conv2D atomically; ignore the
-    residual structure. Cheapest.
-  - **(b) Per-block calibration** — calibrate input → block-output as a unit.
-    Theoretically cleaner but the inverse problem is no longer per-layer.
+**D10. ResBlock — option (a): per-sub-layer calibration.** Recurse into the
+block: walk `main_layers` (Conv→ReLU→BN→Conv→ReLU→BN), then `proj_layers` if
+present, calibrating each Conv2D / BN as if standalone. ReLU is pass-through.
+Then sum into the merged moments and continue.
+
+Option (b) (per-block) deferred — would require deriving an inverse for
+$(\text{main} + \text{skip})$ jointly, which is no longer per-layer.
+
+**Caveat — residual doubling.** After the add, variance is roughly $2\times$
+either path alone. The next block's first conv still calibrates its OUTPUT to
+$\sigma_M, \sigma_Z$ regardless of input scale, so this isn't catastrophic —
+but it means the prior is implicitly enforced "post-add", not "post-conv".
+First knob to revisit if ResNet18+IBI underperforms He.
+
 - Validate against the current 89% CIFAR-10 baseline.
 
 ---
 
 ## 6. Out of scope for V1
 
-- Conv2D / BN / ResBlock / MultiheadAttentionV2 calibration (Phases 2/3).
+- MultiheadAttentionV2 / LayerNorm / RMSNorm calibration (transformer track).
 - Inverse-Remax target derivation (D3 alternative).
 - Universal $(\sigma_M, \sigma_Z)$ search across architectures.
 - Bias-prior $\alpha$ sweep.

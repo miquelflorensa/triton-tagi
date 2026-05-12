@@ -33,8 +33,12 @@ from torch import Tensor
 from .base import Layer, LearnableLayer
 from .layers.multihead_attention import MultiheadAttentionV2
 from .layers.resblock import ResBlock
-from .update.observation import compute_innovation, compute_innovation_with_indices
-from .update.parameters import get_cap_factor
+from .update.observation import (
+    compute_innovation,
+    compute_innovation_remax_cat,
+    compute_innovation_with_indices,
+)
+from .update.parameters import get_cap_factor, update_parameters_precision
 
 
 class Sequential:
@@ -47,9 +51,21 @@ class Sequential:
     device : str or torch.device  (default "cuda")
     """
 
-    def __init__(self, layers: list, device: str = "cuda") -> None:
+    def __init__(
+        self,
+        layers: list,
+        device: str = "cuda",
+        update_mode: str = "cap",
+        rho_mode: str = "full",
+        rho: float = 1.0,
+        chi_max: float = 1e9,
+    ) -> None:
         self.device = torch.device(device)
         self.layers = layers
+        self.update_mode = update_mode
+        self.rho_mode = rho_mode
+        self.rho = rho
+        self.chi_max = chi_max
 
         # Move learnable layers to the target device
         for layer in self.layers:
@@ -85,6 +101,51 @@ class Sequential:
         if getattr(layer, "running_mean", None) is not None:
             layer.running_mean = layer.running_mean.to(self.device)
             layer.running_var = layer.running_var.to(self.device)
+
+    # ------------------------------------------------------------------
+    #  Parameter update helpers
+    # ------------------------------------------------------------------
+
+    def _get_rho(self, batch_size: int) -> float:
+        if self.rho_mode == "full":
+            return 1.0
+        if self.rho_mode == "sqrt_batch":
+            return batch_size ** -0.5
+        if self.rho_mode == "batch_avg":
+            return 1.0 / batch_size
+        if self.rho_mode == "custom":
+            return self.rho
+        raise ValueError(f"Unknown rho_mode: {self.rho_mode!r}")
+
+    def _update_precision_layer(self, layer: LearnableLayer, rho: float) -> None:
+        if isinstance(layer, ResBlock):
+            for sub in layer._learnable:
+                self._update_precision_layer(sub, rho)
+            return
+        if isinstance(layer, MultiheadAttentionV2):
+            for proj in (layer.q_proj, layer.k_proj, layer.v_proj):
+                self._update_precision_layer(proj, rho)
+            return
+        update_parameters_precision(layer.mw, layer.Sw, layer.delta_mw, layer.delta_Sw,
+                                    rho=rho, chi_max=self.chi_max)
+        if getattr(layer, "has_bias", False):
+            update_parameters_precision(layer.mb, layer.Sb, layer.delta_mb, layer.delta_Sb,
+                                        rho=rho, chi_max=self.chi_max)
+
+    def _apply_param_update(self, batch_size: int) -> None:
+        if self.update_mode == "cap":
+            cap_factor = get_cap_factor(batch_size)
+            for layer in self.layers:
+                if isinstance(layer, LearnableLayer):
+                    layer.update(cap_factor)
+            return
+        if self.update_mode == "precision":
+            rho = self._get_rho(batch_size)
+            for layer in self.layers:
+                if isinstance(layer, LearnableLayer):
+                    self._update_precision_layer(layer, rho)
+            return
+        raise ValueError(f"Unknown update_mode: {self.update_mode!r}")
 
     # ------------------------------------------------------------------
     #  Forward pass
@@ -143,11 +204,8 @@ class Sequential:
         for layer in reversed(self.layers):
             delta_mu, delta_var = layer.backward(delta_mu, delta_var)
 
-        # ── 4. Capped parameter update (cuTAGI-style) ──
-        cap_factor = get_cap_factor(batch_size)
-        for layer in self.layers:
-            if isinstance(layer, LearnableLayer):
-                layer.update(cap_factor)
+        # ── 4. Parameter update ──
+        self._apply_param_update(batch_size)
 
         return y_pred_mu, y_pred_var
 
@@ -215,12 +273,42 @@ class Sequential:
         for layer in reversed(self.layers):
             delta_mu, delta_var = layer.backward(delta_mu, delta_var)
 
-        # 5. Capped parameter update
-        cap_factor = get_cap_factor(batch_size)
-        for layer in self.layers:
-            if isinstance(layer, LearnableLayer):
-                layer.update(cap_factor)
+        # 5. Parameter update
+        self._apply_param_update(batch_size)
 
+        return y_pred_mu, y_pred_var
+
+    # ------------------------------------------------------------------
+    #  Categorical-Remax training step (no sigma_v)
+    # ------------------------------------------------------------------
+
+    def step_remax_cat(self, x_batch: Tensor, y_batch: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        One training step for Remax/softmax classification with categorical innovation.
+
+        Uses the diagonal categorical-Remax observation model:
+            sigma²_Yi = S_Ai + mu_Ai * (1 - mu_Ai)
+
+        No sigma_v argument — observation variance is derived from prediction
+        confidence automatically.
+
+        Args:
+            x_batch: Input mini-batch, shape (B, in_features).
+            y_batch: One-hot targets in {0, 1}, shape (B, K).
+
+        Returns:
+            y_pred_mu:  Predicted means before update, shape (B, K).
+            y_pred_var: Predicted variances before update, shape (B, K).
+        """
+        batch_size = x_batch.shape[0]
+
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+        delta_mu, delta_var = compute_innovation_remax_cat(y_batch, y_pred_mu, y_pred_var)
+
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+
+        self._apply_param_update(batch_size)
         return y_pred_mu, y_pred_var
 
     # ------------------------------------------------------------------
