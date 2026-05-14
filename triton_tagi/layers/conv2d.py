@@ -27,7 +27,7 @@ from torch import Tensor
 from ..base import LearnableLayer
 from ..kernels.common import triton_fused_backward_delta, triton_fused_var_forward
 from ..param_init import init_weight_bias_conv2d
-from ..update.parameters import update_parameters
+from ..update.parameters import maybe_chi_buffer, update_parameters
 
 BLOCK_EW = 1024
 
@@ -373,10 +373,24 @@ class Conv2D(LearnableLayer):
     # ------------------------------------------------------------------
     #  Update (apply capped deltas — called by the network)
     # ------------------------------------------------------------------
-    def update(self, cap_factor: float) -> None:
-        """Apply stored parameter deltas with cuTAGI-style capping."""
-        update_parameters(self.mw, self.Sw, self.delta_mw, self.delta_Sw, cap_factor)
-        update_parameters(self.mb, self.Sb, self.delta_mb, self.delta_Sb, cap_factor)
+    def update(
+        self,
+        cap_factor: float,
+        update_rule: str = "capped_additive",
+        rho: float = 1.0,
+        record_chi: bool = False,
+    ) -> None:
+        """Apply stored parameter deltas. See ``LearnableLayer.update``."""
+        chi_w = maybe_chi_buffer(self, "chi_w", self.Sw) if record_chi else None
+        chi_b = maybe_chi_buffer(self, "chi_b", self.Sb) if record_chi else None
+        update_parameters(
+            self.mw, self.Sw, self.delta_mw, self.delta_Sw,
+            cap_factor, update_rule=update_rule, rho=rho, chi_out=chi_w,
+        )
+        update_parameters(
+            self.mb, self.Sb, self.delta_mb, self.delta_Sb,
+            cap_factor, update_rule=update_rule, rho=rho, chi_out=chi_b,
+        )
 
     @property
     def num_parameters(self) -> int:

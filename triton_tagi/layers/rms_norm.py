@@ -36,7 +36,7 @@ from torch import Tensor
 
 from ..base import LearnableLayer
 from ..param_init import init_weight_bias_norm
-from ..update.parameters import update_parameters
+from ..update.parameters import maybe_chi_buffer, update_parameters
 
 
 class RMSNorm(LearnableLayer):
@@ -136,8 +136,18 @@ class RMSNorm(LearnableLayer):
     # ------------------------------------------------------------------
     #  Update
     # ------------------------------------------------------------------
-    def update(self, cap_factor: float) -> None:
-        update_parameters(self.mw, self.Sw, self.delta_mw, self.delta_Sw, cap_factor)
+    def update(
+        self,
+        cap_factor: float,
+        update_rule: str = "capped_additive",
+        rho: float = 1.0,
+        record_chi: bool = False,
+    ) -> None:
+        chi_w = maybe_chi_buffer(self, "chi_w", self.Sw) if record_chi else None
+        update_parameters(
+            self.mw, self.Sw, self.delta_mw, self.delta_Sw,
+            cap_factor, update_rule=update_rule, rho=rho, chi_out=chi_w,
+        )
 
     @property
     def num_parameters(self) -> int:

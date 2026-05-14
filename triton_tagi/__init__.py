@@ -57,6 +57,7 @@ from .layers import (
     ResBlock,
 )
 from .network import Sequential
+from .update import VALID_RULES, chi_stats, get_cap_factor, update_parameters
 from .param_init import (
     gaussian_param_init,
     he_init,
@@ -103,6 +104,11 @@ __all__ = [
     "labels_to_hrc",
     "obs_to_class_probs",
     "get_predicted_labels",
+    # Update rules / diagnostics
+    "VALID_RULES",
+    "chi_stats",
+    "get_cap_factor",
+    "update_parameters",
     # Run management
     "RunDir",
     "load_model",

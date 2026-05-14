@@ -270,10 +270,16 @@ class MultiheadAttentionV2(LearnableLayer):
     # ------------------------------------------------------------------
     #  Update
     # ------------------------------------------------------------------
-    def update(self, cap_factor: float) -> None:
-        self.q_proj.update(cap_factor)
-        self.k_proj.update(cap_factor)
-        self.v_proj.update(cap_factor)
+    def update(
+        self,
+        cap_factor: float,
+        update_rule: str = "capped_additive",
+        rho: float = 1.0,
+        record_chi: bool = False,
+    ) -> None:
+        self.q_proj.update(cap_factor, update_rule=update_rule, rho=rho, record_chi=record_chi)
+        self.k_proj.update(cap_factor, update_rule=update_rule, rho=rho, record_chi=record_chi)
+        self.v_proj.update(cap_factor, update_rule=update_rule, rho=rho, record_chi=record_chi)
 
     @property
     def num_parameters(self) -> int:

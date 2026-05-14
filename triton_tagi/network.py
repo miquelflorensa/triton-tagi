@@ -34,7 +34,7 @@ from .base import Layer, LearnableLayer
 from .layers.multihead_attention import MultiheadAttentionV2
 from .layers.resblock import ResBlock
 from .update.observation import compute_innovation, compute_innovation_with_indices
-from .update.parameters import get_cap_factor
+from .update.parameters import VALID_RULES, chi_stats, get_cap_factor
 
 
 class Sequential:
@@ -43,13 +43,47 @@ class Sequential:
 
     Parameters
     ----------
-    layers : list of layer objects
-    device : str or torch.device  (default "cuda")
+    layers      : list of layer objects
+    device      : str or torch.device  (default "cuda")
+    update_rule : str
+        One of ``additive``, ``capped_additive``, ``precision_normalized``,
+        ``tempered_precision_normalized``. Default ``capped_additive`` matches
+        the cuTAGI baseline. See ``triton_tagi.update.parameters``.
+    rho         : float
+        Temperature for the precision-normalised rules. Ignored otherwise.
+        Use ``1.0`` for plain PN-TAGI; ``< 1`` damps both the mean step and
+        the variance contraction.
+    record_chi  : bool
+        If True, every ``step`` records ``raw_chi = -ΔS / S`` per parameter
+        tensor on each learnable layer (see ``maybe_chi_buffer``). Off by
+        default — turn on when collecting contraction diagnostics.
     """
 
-    def __init__(self, layers: list, device: str = "cuda") -> None:
+    def __init__(
+        self,
+        layers: list,
+        device: str = "cuda",
+        update_rule: str = "capped_additive",
+        rho: float = 1.0,
+        record_chi: bool = False,
+        cap_factor: float | None = None,
+    ) -> None:
+        """``cap_factor``: if not ``None``, override the batch-size heuristic
+        in ``get_cap_factor`` for every ``step`` and use this constant
+        instead. Useful for testing principled κ-target schemes: setting
+        ``cap_factor = 1.0`` corresponds to ``κ ≤ 1`` (a step is at most
+        one prior standard deviation), independent of batch size.
+        """
+        if update_rule not in VALID_RULES:
+            raise ValueError(
+                f"update_rule must be one of {VALID_RULES}, got {update_rule!r}"
+            )
         self.device = torch.device(device)
         self.layers = layers
+        self.update_rule = update_rule
+        self.rho = rho
+        self.record_chi = record_chi
+        self.cap_factor_override = cap_factor
 
         # Move learnable layers to the target device
         for layer in self.layers:
@@ -144,10 +178,19 @@ class Sequential:
             delta_mu, delta_var = layer.backward(delta_mu, delta_var)
 
         # ── 4. Capped parameter update (cuTAGI-style) ──
-        cap_factor = get_cap_factor(batch_size)
+        cap_factor = (
+            self.cap_factor_override
+            if self.cap_factor_override is not None
+            else get_cap_factor(batch_size)
+        )
         for layer in self.layers:
             if isinstance(layer, LearnableLayer):
-                layer.update(cap_factor)
+                layer.update(
+                    cap_factor,
+                    update_rule=self.update_rule,
+                    rho=self.rho,
+                    record_chi=self.record_chi,
+                )
 
         return y_pred_mu, y_pred_var
 
@@ -216,10 +259,19 @@ class Sequential:
             delta_mu, delta_var = layer.backward(delta_mu, delta_var)
 
         # 5. Capped parameter update
-        cap_factor = get_cap_factor(batch_size)
+        cap_factor = (
+            self.cap_factor_override
+            if self.cap_factor_override is not None
+            else get_cap_factor(batch_size)
+        )
         for layer in self.layers:
             if isinstance(layer, LearnableLayer):
-                layer.update(cap_factor)
+                layer.update(
+                    cap_factor,
+                    update_rule=self.update_rule,
+                    rho=self.rho,
+                    record_chi=self.record_chi,
+                )
 
         return y_pred_mu, y_pred_var
 
@@ -244,6 +296,38 @@ class Sequential:
             lines.append(f"  ({i}): {layer}")
         lines.append(")")
         return "\n".join(lines)
+
+    def collect_chi_stats(self) -> dict:
+        """Aggregate PN-TAGI contraction diagnostics from each learnable layer.
+
+        Walks ``self.layers``, finds tensors named ``chi_w`` / ``chi_b`` (and
+        recurses into ``ResBlock`` / ``MultiheadAttentionV2`` sub-layers), and
+        runs ``chi_stats`` on each. Requires ``record_chi=True`` on at least
+        one prior ``step`` — buffers populated then are read here.
+
+        Returns a dict keyed by ``"<layer_idx>.<param>"`` (e.g. ``"3.chi_w"``).
+        Empty dict if no chi buffers exist yet.
+        """
+        out: dict[str, dict] = {}
+
+        def _gather(layer, prefix: str) -> None:
+            if isinstance(layer, ResBlock):
+                for j, sub in enumerate(layer._learnable):
+                    _gather(sub, f"{prefix}.{j}")
+                return
+            if isinstance(layer, MultiheadAttentionV2):
+                for name, sub in (("q", layer.q_proj), ("k", layer.k_proj), ("v", layer.v_proj)):
+                    _gather(sub, f"{prefix}.{name}")
+                return
+            for attr in ("chi_w", "chi_b"):
+                buf = getattr(layer, attr, None)
+                if buf is not None:
+                    out[f"{prefix}.{attr}"] = chi_stats(buf)
+
+        for i, layer in enumerate(self.layers):
+            if isinstance(layer, LearnableLayer):
+                _gather(layer, str(i))
+        return out
 
     def num_parameters(self) -> int:
         """Return total number of learnable scalars (means + variances)."""

@@ -432,10 +432,16 @@ class ResBlock(LearnableLayer):
     # ------------------------------------------------------------------
     #  Update
     # ------------------------------------------------------------------
-    def update(self, cap_factor: float) -> None:
-        """Apply capped parameter updates to all learnable sub-layers."""
+    def update(
+        self,
+        cap_factor: float,
+        update_rule: str = "capped_additive",
+        rho: float = 1.0,
+        record_chi: bool = False,
+    ) -> None:
+        """Apply parameter updates to all learnable sub-layers."""
         for layer in self._learnable:
-            layer.update(cap_factor)
+            layer.update(cap_factor, update_rule=update_rule, rho=rho, record_chi=record_chi)
 
     # ------------------------------------------------------------------
     #  Properties for Sequential compatibility

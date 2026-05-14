@@ -24,7 +24,7 @@ from torch import Tensor
 from ..base import LearnableLayer
 from ..kernels.common import triton_fused_backward_delta, triton_fused_var_forward
 from ..param_init import init_weight_bias_linear
-from ..update.parameters import update_parameters
+from ..update.parameters import maybe_chi_buffer, update_parameters
 
 
 class Linear(LearnableLayer):
@@ -158,18 +158,25 @@ class Linear(LearnableLayer):
     # ------------------------------------------------------------------
     #  Update (apply capped deltas — called by the network)
     # ------------------------------------------------------------------
-    def update(self, cap_factor: float) -> None:
-        """
-        Apply the stored parameter deltas with cuTAGI-style capping.
-
-        Parameters
-        ----------
-        cap_factor : float  regularisation strength (from get_cap_factor)
-        """
-        update_parameters(self.mw, self.Sw, self.delta_mw, self.delta_Sw, cap_factor)
-
+    def update(
+        self,
+        cap_factor: float,
+        update_rule: str = "capped_additive",
+        rho: float = 1.0,
+        record_chi: bool = False,
+    ) -> None:
+        """Apply the stored parameter deltas. See ``LearnableLayer.update``."""
+        chi_w = maybe_chi_buffer(self, "chi_w", self.Sw) if record_chi else None
+        update_parameters(
+            self.mw, self.Sw, self.delta_mw, self.delta_Sw,
+            cap_factor, update_rule=update_rule, rho=rho, chi_out=chi_w,
+        )
         if self.has_bias:
-            update_parameters(self.mb, self.Sb, self.delta_mb, self.delta_Sb, cap_factor)
+            chi_b = maybe_chi_buffer(self, "chi_b", self.Sb) if record_chi else None
+            update_parameters(
+                self.mb, self.Sb, self.delta_mb, self.delta_Sb,
+                cap_factor, update_rule=update_rule, rho=rho, chi_out=chi_b,
+            )
 
     @property
     def num_parameters(self) -> int:

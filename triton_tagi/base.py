@@ -52,11 +52,27 @@ class LearnableLayer(Layer):
     """Base class for layers with trainable parameters (weights, biases, etc.)."""
 
     @abstractmethod
-    def update(self, cap_factor: float) -> None:
-        """Apply the capped parameter update using deltas stored during backward.
+    def update(
+        self,
+        cap_factor: float,
+        update_rule: str = "capped_additive",
+        rho: float = 1.0,
+        record_chi: bool = False,
+    ) -> None:
+        """Apply the TAGI parameter update using deltas stored during backward.
 
         Args:
-            cap_factor: Capping factor computed from the batch size.
+            cap_factor: Capping factor (only used by ``capped_additive``; other
+                rules accept and ignore it so the call site doesn't have to branch).
+            update_rule: One of ``additive``, ``capped_additive``,
+                ``precision_normalized``, ``tempered_precision_normalized``.
+                See ``triton_tagi.update.parameters`` for the math.
+            rho: Temperature for the precision-normalised rules. ``1.0`` is plain
+                PN-TAGI; ``< 1`` damps both the mean step and the variance
+                contraction by the same factor.
+            record_chi: If True, the layer writes ``raw_chi = -dS / max(S, eps)``
+                into ``self.chi_w`` (and ``self.chi_b`` if the layer has a bias).
+                Buffers are lazy-allocated and reused across steps.
         """
         ...
 
