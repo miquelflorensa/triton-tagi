@@ -116,7 +116,13 @@ class Sequential:
     # ------------------------------------------------------------------
     #  Single training step (cuTAGI-style: backward + capped update)
     # ------------------------------------------------------------------
-    def step(self, x_batch: Tensor, y_batch: Tensor, sigma_v: float) -> tuple[Tensor, Tensor]:
+    def step(
+        self,
+        x_batch: Tensor,
+        y_batch: Tensor,
+        sigma_v: float,
+        online: "OnlineCalibration | None" = None,
+    ) -> tuple[Tensor, Tensor]:
         """
         Perform one forward + backward + capped-update TAGI step.
 
@@ -125,6 +131,13 @@ class Sequential:
         x_batch : Tensor  input mini-batch
         y_batch : Tensor  target mini-batch
         sigma_v : float   observation noise std
+        online  : OnlineCalibration | None
+            If given (and the network has been ``calibrate``-d), runs the
+            parameter-free online operator T after the update: σ_v is taken from
+            the online running estimate (homoscedastic) or learned by the V2 head
+            (heteroscedastic), the forgetting rate λ_t is set from the batch
+            surprise, and the posterior is re-inflated / projected. When ``None``
+            (default), behaviour is unchanged.
 
         Returns
         -------
@@ -136,8 +149,23 @@ class Sequential:
         # ── 1. Forward ──
         y_pred_mu, y_pred_var = self.forward(x_batch)
 
-        # ── 2. Output innovation ──
-        delta_mu, delta_var = compute_innovation(y_batch, y_pred_mu, y_pred_var, sigma_v)
+        # ── 2. Output innovation (σ_v from the online estimate when calibrated) ──
+        if online is not None and online.sigma_v_mode == "homoscedastic":
+            sigma_v_eff = online.sigma_v
+        else:
+            sigma_v_eff = sigma_v
+
+        lam = 0.0
+        if online is not None and online.mode != "off":
+            if online.mode == "const":
+                lam = online.lam
+            elif online.mode == "surprise":
+                from .calibrate import batch_chi2, surprise_lambda
+
+                chi2 = batch_chi2(y_batch, y_pred_mu, y_pred_var, sigma_v_eff**2)
+                lam = surprise_lambda(chi2, online.lam, online.tau)
+
+        delta_mu, delta_var = compute_innovation(y_batch, y_pred_mu, y_pred_var, sigma_v_eff)
 
         # ── 3. Backward (compute + store deltas, NO param update) ──
         for layer in reversed(self.layers):
@@ -148,6 +176,14 @@ class Sequential:
         for layer in self.layers:
             if isinstance(layer, LearnableLayer):
                 layer.update(cap_factor)
+
+        # ── 5. Online operator T: re-inflate / project, adapt σ_v (opt-in) ──
+        if online is not None:
+            from .calibrate import online_recalibrate, update_sigma_v2
+
+            if online.mode != "off":
+                online_recalibrate(self, lam, online)
+            update_sigma_v2(online, y_batch, y_pred_mu, y_pred_var)
 
         return y_pred_mu, y_pred_var
 

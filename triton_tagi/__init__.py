@@ -30,6 +30,7 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = False
 
 from .base import Layer, LearnableLayer
+from .calibrate import OnlineCalibration, calibrate, online_recalibrate
 from .checkpoint import RunDir, load_model
 from .hrc_softmax import (
     HierarchicalSoftmax,
@@ -110,4 +111,8 @@ __all__ = [
     # Run management
     "RunDir",
     "load_model",
+    # Unified parameter-free online calibration
+    "calibrate",
+    "OnlineCalibration",
+    "online_recalibrate",
 ]
