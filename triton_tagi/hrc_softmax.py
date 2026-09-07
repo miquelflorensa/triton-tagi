@@ -459,3 +459,77 @@ def get_predicted_labels(
         Predicted class indices, shape (B,), dtype int64.
     """
     return obs_to_class_probs(ma, Sa, hrc, alpha).argmax(dim=1)
+
+
+def project_classes_to_nodes(
+    hrc: HierarchicalSoftmax,
+    weight: Tensor,
+    bias: Tensor | None = None,
+) -> tuple[Tensor, Tensor]:
+    """Project a per-class linear classifier onto the tree's decision nodes.
+
+    A class-indexed classifier cannot be copied onto an HRC head, because the
+    head scores tree nodes rather than classes. Node ``j`` decides between the
+    classes reachable through its ``+1`` branch and those through its ``-1``
+    branch, so the projection that preserves what the node is being asked is
+    the contrast between the two branch means::
+
+        w_node = mean(w_class for classes on the +1 branch)
+               - mean(w_class for classes on the -1 branch)
+
+    This is invariant to adding a constant vector to every class, which is the
+    right gauge here: the tree's latent variables are only defined up to that
+    shift. A node with an empty branch (reachable only in the padded tree)
+    contributes zero from the missing side.
+
+    Args:
+        hrc: Tree structure from :func:`class_to_obs` or
+            :func:`class_to_obs_full`.
+        weight: Per-class weight, shape (n_classes, in_features), as
+            :class:`torch.nn.Linear` stores it.
+        bias: Per-class bias, shape (n_classes,). ``None`` means zero.
+
+    Returns:
+        ``(node_weight, node_bias)`` with shapes (hrc.len, in_features) and
+        (hrc.len,), on the dtype and device of ``weight``.
+    """
+
+    if weight.dim() != 2:
+        raise ValueError("weight must have shape (n_classes, in_features)")
+    if weight.shape[0] != hrc.n_classes:
+        raise ValueError(
+            f"weight has {weight.shape[0]} classes but the tree encodes {hrc.n_classes}"
+        )
+    if bias is not None and bias.shape != (hrc.n_classes,):
+        raise ValueError("bias must have shape (n_classes,)")
+
+    device, dtype = weight.device, weight.dtype
+    resolved_bias = (
+        torch.zeros(hrc.n_classes, device=device, dtype=dtype)
+        if bias is None
+        else bias.to(device=device, dtype=dtype)
+    )
+
+    obs = hrc.obs.to(device=device, dtype=dtype)
+    idx = hrc.idx.to(device=device, dtype=torch.long) - 1  # stored 1-indexed
+    mask = hrc.path_mask(device=device).to(dtype=dtype)
+
+    node_weight = torch.zeros(hrc.len, weight.shape[1], device=device, dtype=dtype)
+    node_bias = torch.zeros(hrc.len, device=device, dtype=dtype)
+    for sign, target in ((1.0, 1.0), (-1.0, -1.0)):
+        # Membership of each (class, level) factor in this branch of each node.
+        selected = mask * (obs == sign).to(dtype)  # (n_classes, n_obs)
+        counts = torch.zeros(hrc.len, device=device, dtype=dtype)
+        counts.index_add_(0, idx.reshape(-1), selected.reshape(-1))
+        # Each class contributes its own row to every node whose branch it is on.
+        flat_weight = weight.repeat_interleave(hrc.n_obs, dim=0)
+        flat_bias = resolved_bias.repeat_interleave(hrc.n_obs)
+        sums = torch.zeros_like(node_weight)
+        sums.index_add_(0, idx.reshape(-1), selected.reshape(-1, 1) * flat_weight)
+        bias_sums = torch.zeros(hrc.len, device=device, dtype=dtype)
+        bias_sums.index_add_(0, idx.reshape(-1), selected.reshape(-1) * flat_bias)
+        # An empty branch leaves counts at zero; clamping makes it contribute zero.
+        safe = counts.clamp_min(1.0)
+        node_weight = node_weight + target * sums / safe.unsqueeze(1)
+        node_bias = node_bias + target * bias_sums / safe
+    return node_weight, node_bias

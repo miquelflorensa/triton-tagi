@@ -23,6 +23,7 @@ from .hrc_softmax import (
     class_to_obs,
     class_to_obs_full,
     obs_to_class_probs_tagiv,
+    project_classes_to_nodes,
 )
 from .hsm_calibration import (
     DEFAULT_GAIN_ORDER,
@@ -59,6 +60,7 @@ _UNIT_PROBIT_HEADS = {"hrc_probit"}
 _HRC_HEADS = {"hrc", "hrc_probit", "hrc_tagiv"}
 _TAGIV_HEADS = {"categorical_tagiv", "hrc_tagiv"}
 _LOGIT_TARGET_HEADS = {"logit_tagiv"}
+_MEAN_INIT_MODES = ("random", "zero", "backbone")
 
 
 def normalize_class_probabilities(probabilities: Tensor, eps: float = 1e-12) -> Tensor:
@@ -130,6 +132,8 @@ class TAGILastLayerClassifier:
         hrc_log_tau: float | None = None,
         gain_w: float = 0.1,
         gain_b: float = 0.1,
+        mean_init: str = "random",
+        backbone_fc: tuple[Tensor, Tensor] | None = None,
         feature_mean: Tensor | list[float] | None = None,
         feature_scale: float = 1.0,
         sigma_v: float | None = None,
@@ -158,6 +162,15 @@ class TAGILastLayerClassifier:
             raise ValueError("input_dim must be positive and num_classes must be at least two")
         if gain_w < 0.0 or gain_b < 0.0:
             raise ValueError("gain_w and gain_b must be nonnegative")
+        if mean_init not in _MEAN_INIT_MODES:
+            raise ValueError(
+                f"Unknown mean_init {mean_init!r}; expected one of {list(_MEAN_INIT_MODES)}"
+            )
+        if (mean_init == "backbone") != (backbone_fc is not None):
+            raise ValueError(
+                "mean_init='backbone' requires backbone_fc, and backbone_fc is "
+                "meaningless for any other mean_init"
+            )
         if feature_scale <= 0.0 or not math.isfinite(feature_scale):
             raise ValueError("feature_scale must be finite and positive")
         if v2bar_weight_var < 0.0 or v2bar_bias_var < 0.0:
@@ -248,6 +261,7 @@ class TAGILastLayerClassifier:
         self.device = torch.device(device)
         self.gain_w = float(gain_w)
         self.gain_b = float(gain_b)
+        self.mean_init = mean_init
         if feature_mean is None:
             self.feature_mean = None
         else:
@@ -331,6 +345,7 @@ class TAGILastLayerClassifier:
         elif head in _LOGIT_TARGET_HEADS:
             layers.append(EvenExp(base_dim))
             self._initialize_logit_tagiv_prior()
+        self._apply_mean_init(backbone_fc)
         self.net = Sequential(layers, device=self.device)
 
     def _initialize_tagiv_prior(self) -> None:
@@ -376,6 +391,98 @@ class TAGILastLayerClassifier:
             self.linear.Sw[:, odd].fill_(weight_variance)
             self.linear.mb[:, odd].fill_(mu_g)
             self.linear.Sb[:, odd].fill_(bias_variance)
+
+    def _backbone_class_weights(
+        self, backbone_fc: tuple[Tensor, Tensor]
+    ) -> tuple[Tensor, Tensor]:
+        """Validate a backbone ``fc`` layer and map it onto transformed features.
+
+        The head does not see raw representations: it sees
+        ``(a - feature_mean) / feature_scale``. Reproducing the backbone's own
+        function of the raw features therefore needs the compensating affine
+        map ``w -> feature_scale * w``, ``b -> b + w @ feature_mean``. Both
+        reduce to a direct copy under the identity transform this study uses.
+        """
+
+        weight, bias = backbone_fc
+        if weight.dim() != 2 or tuple(weight.shape) != (self.num_classes, self.input_dim):
+            raise ValueError(
+                "backbone_fc weight must have shape (num_classes, input_dim), "
+                f"got {tuple(weight.shape)}"
+            )
+        dtype, device = self.linear.mw.dtype, self.device
+        resolved_weight = weight.to(device=device, dtype=dtype)
+        if bias is None:
+            resolved_bias = torch.zeros(self.num_classes, device=device, dtype=dtype)
+        else:
+            if tuple(bias.shape) != (self.num_classes,):
+                raise ValueError(
+                    f"backbone_fc bias must have shape (num_classes,), got {tuple(bias.shape)}"
+                )
+            resolved_bias = bias.to(device=device, dtype=dtype)
+        if not torch.isfinite(resolved_weight).all() or not torch.isfinite(resolved_bias).all():
+            raise ValueError("backbone_fc must be finite")
+        if self.feature_mean is not None:
+            resolved_bias = resolved_bias + resolved_weight @ self.feature_mean.reshape(-1)
+        return resolved_weight * self.feature_scale, resolved_bias
+
+    def _apply_mean_init(self, backbone_fc: tuple[Tensor, Tensor] | None) -> None:
+        """Set the prior weight means according to ``mean_init``.
+
+        Runs after the head-specific prior initializers, and writes only the
+        latent stream: on the interleaved heads the odd channels carry a
+        variance prior that those initializers own, and it is left untouched.
+
+        The three arms are
+
+        ``random``
+            A no-op, leaving the He draw the constructor made. This is the
+            status quo, so every existing configuration is unchanged. Note that
+            ``logit_tagiv`` zeroes its own latent means in
+            :meth:`_initialize_logit_tagiv_prior`, by design, so ``random`` and
+            ``zero`` coincide for that head.
+        ``zero``
+            A class-symmetric prior that commits to no particular classifier.
+        ``backbone``
+            A warm start from the trained ``fc`` layer the features came from.
+            ``logit_tagiv`` routes through
+            :meth:`initialize_mean_from_teacher`, which applies the centering
+            and ``logit_scale`` division its targets were built with. The HRC
+            heads score tree nodes rather than classes and so need the
+            branch-contrast projection of
+            :func:`~triton_tagi.hrc_softmax.project_classes_to_nodes`; that
+            projection is taken on class-centered weights, which fixes the
+            latent gauge on the padded tree's single-branch nodes and is a
+            no-op on the full tree. Every other head is a direct copy.
+
+        Prior variances are never touched by this method: all three arms leave
+        ``Sw`` and ``Sb`` exactly as the gain determined them.
+        """
+
+        if self.mean_init == "random":
+            return
+        interleaved = self.head in _TAGIV_HEADS | _LOGIT_TARGET_HEADS
+        latent = slice(0, None, 2) if interleaved else slice(None)
+        if self.mean_init == "zero":
+            with torch.no_grad():
+                self.linear.mw[:, latent] = 0.0
+                if self.linear.mb is not None:
+                    self.linear.mb[:, latent] = 0.0
+            return
+
+        assert backbone_fc is not None  # guaranteed by __init__
+        weight, bias = self._backbone_class_weights(backbone_fc)
+        if self.head in _LOGIT_TARGET_HEADS:
+            self.initialize_mean_from_teacher(weight, bias, scale=self.logit_scale)
+            return
+        if self.hrc is not None:
+            weight, bias = project_classes_to_nodes(
+                self.hrc, weight - weight.mean(dim=0, keepdim=True), bias - bias.mean()
+            )
+        with torch.no_grad():
+            self.linear.mw[:, latent] = weight.T
+            if self.linear.mb is not None:
+                self.linear.mb[:, latent] = bias.reshape(1, -1)
 
     def _compress_variance(self, aleatoric: Tensor) -> Tensor:
         if self.logit_variance_power >= 1.0 or self.logit_variance_reference is None:
@@ -1157,6 +1264,7 @@ class TAGILastLayerClassifier:
             "head": self.head,
             "gain_w": self.gain_w,
             "gain_b": self.gain_b,
+            "mean_init": self.mean_init,
             "feature_mean": (
                 None
                 if self.feature_mean is None
@@ -1223,7 +1331,13 @@ class TAGILastLayerClassifier:
             # Migrate checkpoints from the initial implementation, which
             # serialized the structural unit scale as if it were tunable.
             config["sigma_v"] = None
+        # mean_init only ever shaped the prior means, which the saved state is
+        # about to overwrite, and the backbone tensors it needed are not part
+        # of the checkpoint. Rebuild on the no-op arm and restore the recorded
+        # value, so config() still reports how the run was initialized.
+        saved_mean_init = config.pop("mean_init", "random")
         classifier = cls(**config, device=device)
         for name, value in payload["state"].items():
             getattr(classifier.linear, name).copy_(value.to(classifier.device))
+        classifier.mean_init = saved_mean_init
         return classifier, dict(payload.get("metadata", {}))

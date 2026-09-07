@@ -17,10 +17,20 @@ to pick the work up from here alone.
 
 | head | link | observation noise | output dim |
 |---|---|---|---|
-| `hrc` | hierarchical binary probit tree | fixed `sigma_v` | tree nodes: 9 / 99 / 999 |
+| `hrc` | hierarchical binary probit tree | fixed `sigma_v` | tree nodes: 11 / 102 / 1001 |
 | `remax_lognormal` | Remax + lognormal moment match | fixed `sigma_v` | K classes |
 | `remax_laplace_diag` | Remax + diagonal Laplace Jacobian | fixed `sigma_v` | K classes |
 | `logit_tagiv` | logit-target TAGI-V (distillation) | learned | 2K interleaved |
+
+**Tree decision (settled 2026-09-07).** `hrc` runs on the *padded* tree,
+`hrc_tree="auto"`, which is `run_study.py`'s default and what every existing
+screen and refine run used, so the reference gain selections transfer. The
+node counts above are the padded ones (K+1). An earlier draft of this table
+said 9 / 99 / 999, which is the **full** tree (`hrc_tree="full"`, K-1 nodes);
+that is the tree `hsm_calibration` used, so the finished calibration slide
+still speaks of 99 groups on CIFAR-100 while this study's `hrc` head has 102
+nodes. The two are not comparable node-for-node, and the deck must not imply
+they are.
 
 `hrc_probit`, `hrc_tagiv`, `categorical_tagiv`, `probit_ovr` and
 `remax_laplace` are still importable but are **not** part of this study.
@@ -47,9 +57,10 @@ to pick the work up from here alone.
 
 ### Axis 1 — mean initialization (PRIMARY, and entirely new)
 
-Nothing in the repo currently exposes this. `TAGILastLayerClassifier` always
-uses He random means; the zero-mean path existed only inside the AGCI branch
-that `ae4787c` deleted. **This must be implemented before anything runs.**
+**Implemented 2026-09-07.** `TAGILastLayerClassifier` now takes
+`mean_init` and `backbone_fc`; see `_apply_mean_init`. 30 tests in
+`tests/unit/test_last_layer_mean_init.py` cover it, and the 455 pre-existing
+tests are unchanged, because `random` is a deliberate no-op.
 
 | arm | weight means | rationale |
 |---|---|---|
@@ -68,21 +79,39 @@ three arms. Only the means move.
 | CIFAR-100 | `.../backbones/cifar100_resnet18.pt` | `[100, 512]` + bias |
 | ImageNet | `runs/imagenet/resnet18_agci/features/pretrained_fc.pt` | `weight [1000, 512]`, `bias [1000]` |
 
-**Open design decision — the HRC projection.** `remax_*` heads output K
-classes, so `backbone` is a direct copy (transposed to `[in, out]`). `hrc`
-outputs *tree nodes*, not classes, so a class→node map is required. Proposed
-rule, to be confirmed by whoever implements it:
+**The HRC projection — RESOLVED, and it works.** The proposed branch-contrast
+rule was implemented as
+`triton_tagi.hrc_softmax.project_classes_to_nodes` and verified against an
+explicit per-node reference loop at K = 10, 100 and 1000 on both trees:
 
     w_node = mean(w_class for classes on the node's +1 branch)
            - mean(w_class for classes on the node's -1 branch)
 
-which makes the node's prior mean the contrast the node actually scores.
-`logit_tagiv` writes the backbone weights into the even (mean) channel and
-leaves the odd (variance) channel at its existing prior.
+One amendment was needed. The contrast is invariant to adding a constant
+vector to every class — the right gauge, since the tree's latents are only
+defined up to that shift — but **only on the full tree**. The padded tree we
+are running has single-branch nodes, where one of the two means is missing and
+the contrast degenerates into a raw branch mean whose scale depends on the
+class gauge. The projection therefore takes the *class-centered* weights,
+`w - mean_k w`, which fixes the gauge on those nodes and is an exact no-op on
+the full tree. Verified: gauge invariance fails on the padded tree without
+centering and holds with it.
 
-If the projection turns out to be wrong or unstable, **report `backbone` for
-the remax heads and mark it N/A for `hrc`** rather than silently substituting
-something else. An honest hole beats a fabricated row.
+So `backbone` is reported for `hrc`, not marked N/A. `remax_*` is a direct
+copy (transposed to `[in, out]`). `logit_tagiv` routes through the head's own
+`initialize_mean_from_teacher`, which writes the even (mean) channel with the
+centering and `logit_scale` division its distillation targets were built with,
+and leaves the odd (variance) channel at the prior `_initialize_logit_tagiv_prior`
+solved for.
+
+**`logit_tagiv` has only two distinct init arms, not three.**
+`_initialize_logit_tagiv_prior` zeroes its own latent means by design — its
+docstring argues a class-symmetric prior is the correct one for a head
+regressing centered logits — so `random` and `zero` are bit-identical for it.
+Confirmed numerically: val NLL 0.1770 vs 0.1770 on CIFAR-10, 0.9620 vs 0.9620
+on CIFAR-100. Its screen is therefore 8 cells per dataset, not 12, and the
+deck should report one row for it with the arms merged rather than two
+identical rows.
 
 ### Axis 2 — gain (prior parameter variance)
 
@@ -127,25 +156,46 @@ supervisors should see it.
 
 ## 4. Execution plan
 
-### Hour 0–1 — unblock (nothing can run until this is done)
+### Hour 0–1 — unblock — **DONE 2026-09-07**
 
-1. **Install torchvision.** It is missing; `triton_tagi/cifar_study.py` imports
-   it, so `run_study.py` and three test modules cannot even import.
-   Verify with `python -m pytest tests/unit -q` — expect 442 + the 3 restored
-   modules, all passing.
-2. **Implement `mean_init`.** Add `mean_init: str = "random"` and
-   `backbone_fc: tuple[Tensor, Tensor] | None = None` to
-   `TAGILastLayerClassifier.__init__`; apply after `self.linear` is built and
-   before any head-specific prior init, so the TAGI-V / logit priors still win
-   on the channels they own. Record `mean_init` in `state_dict()` and in every
-   run `config.json`. Add unit tests: `zero` gives exactly zero means,
-   `backbone` reproduces the fc tensor for a remax head, and all three arms
-   leave `Sw` identical.
-3. **Measure throughput.** Time one 20-epoch CIFAR-100 cell and one 1-epoch
-   ImageNet cell. Every budget below is extrapolated from
-   16.2 s / 20 epochs (CIFAR-100, 99-node tree) and is *unverified for
-   ImageNet* — replace the estimates with measurements before committing to
-   the overnight queue.
+1. ~~**Install torchvision.**~~ Installed `torchvision 0.29.0+cu130` from the
+   PyTorch cu130 index, which left `torch 2.14.0+cu130` untouched (checked
+   with `--dry-run` first). `python -m pytest tests/unit -q` → **485 passed**
+   (455 pre-existing + 30 new `mean_init` tests). Hardware: 2 × RTX 4070 Ti
+   SUPER, 16 GB each.
+2. ~~**Implement `mean_init`.**~~ Done; see §2 above for the design and the
+   one amendment the HRC projection needed. `mean_init` is recorded in
+   `config()`, so it lands in every run's `config.json` and in the run hash,
+   which means new cells cannot collide with the v2 runs already on disk.
+   `load()` rebuilds on the no-op arm and restores the recorded value, since
+   the backbone tensors are not in the checkpoint and the saved state
+   supersedes the prior means anyway.
+3. ~~**Measure throughput.**~~ Measured, not extrapolated. All numbers below
+   are wall clock on one GPU, batch 256.
+
+**CIFAR, 20 epochs, one cell (seconds).** The plan's 20 s/cell estimate holds.
+
+| head | out dim | CIFAR-10 | CIFAR-100 |
+|---|---|---|---|
+| `hrc` (padded) | 11 / 102 | 10–16 | 17–22 |
+| `remax_lognormal` | 10 / 100 | 6–10 | 13–15 |
+| `remax_laplace_diag` | 10 / 100 | 14–16 | 27–29 |
+| `logit_tagiv` | 20 / 200 | 10–14 | 19–23 |
+
+Screen budget: 116 cells/dataset × 2 datasets ≈ **70 min**, one GPU.
+
+**ImageNet-1k, 1 epoch over 1.29 M samples** (129 shards × 10 000, streamed
+from `features_shuffled`; measured on 3 shards and scaled, load time is
+~0.04 s/shard warm and negligible against compute).
+
+| head | out dim | 1 epoch |
+|---|---|---|
+| `remax_lognormal` | 1000 | **2.85 min** |
+| `logit_tagiv` | 2000 | **2.71 min** |
+| `hrc` (padded) | 1001 | **4.25 min** |
+| `remax_laplace_diag` | 1000 | **14.14 min** |
+
+This changes the overnight plan: see the revised §4 ImageNet budget below.
 
 ### Day 1 — CIFAR screen, then CIFAR confirm
 
@@ -176,14 +226,25 @@ leaving for the ImageNet queue.
 Reduced grid, 1 epoch, seed 0, on `features_shuffled` (129 train shards ×
 10 000 × 512, 5 val shards, teacher `logits` present for `logit_tagiv`):
 
-| heads | init | gain | sigma_v | cells |
-|---|---|---|---|---|
-| hrc, remax_lognormal, remax_laplace_diag | 3 | 3 (0.1, 0.3, 1.0) | 2 (0.1, 0.3) | 54 |
-| logit_tagiv | 3 | 3 | — | 9 |
-| | | | | **63** |
+| heads | init | gain | sigma_v | cells | measured cost |
+|---|---|---|---|---|---|
+| hrc | 3 | 3 (0.1, 0.3, 1.0) | 2 (0.1, 0.3) | 18 | 77 min |
+| remax_lognormal | 3 | 3 | 2 | 18 | 51 min |
+| remax_laplace_diag | 3 | 3 | 2 | 18 | **255 min** |
+| logit_tagiv | 2 (see §2) | 3 | — | 6 | 16 min |
+| | | | **60** | **6.6 h, one GPU** |
 
-Budget from the measurement in Hour 0–1. If a cell exceeds ~4 min, cut the
-gain axis to {0.1, 0.3} and say so in the report.
+**Budget decision (measured, 2026-09-07).** The plan's cut rule — "if a cell
+exceeds ~4 min, cut the gain axis to {0.1, 0.3}" — is triggered, by
+`remax_laplace_diag` at 14.1 min/epoch and marginally by `hrc` at 4.25. Do
+**not** cut it: there are two RTX 4070 Ti SUPERs in this box, and splitting
+the queue across them brings 6.6 h down to **≈3.4 h**, which fits the
+overnight window with the gain axis intact. The gain axis is deliverable table
+3, so parallelism is the cheaper thing to spend. Cut gains only if one GPU is
+lost.
+
+`logit_tagiv` contributes 6 cells rather than 9 because `random` and `zero`
+are bit-identical for it (§2).
 
 ### Day 2 — ImageNet confirm, tables, deck
 
@@ -221,12 +282,20 @@ groups, best above n≈3000.
 
 ## 6. Known gaps — surface these, do not paper over them
 
-1. **No ImageNet OOD set is cached.** CIFAR gets SVHN + CIFAR-C; ImageNet gets
-   nothing. Either cache one (ImageNet-O / Places / Textures) during Day 1, or
-   report ImageNet with accuracy + calibration only and say so in the table
-   caption. Decide early — it changes the Day 2 budget.
-2. **`hrc` backbone init needs the class→node projection** of §2. Unresolved.
-3. **ImageNet timing is extrapolated**, never measured. Fix in Hour 0–1.
+1. ~~**No ImageNet OOD set is cached.**~~ **DECIDED 2026-09-07: report
+   ImageNet with accuracy + calibration only**, and say so in the table
+   caption. No OOD source will be cached, so the Day-2 budget stands as
+   written. Consequence to state plainly in the deck: the native-epistemic OOD
+   column — the one that carries the TAGI-over-softmax story — is a
+   **CIFAR-10 / CIFAR-100 result only**, and nothing here shows whether it
+   holds at 1000 classes. The ImageNet row's OOD cells are `n/a`, not blank.
+2. ~~**`hrc` backbone init needs the class→node projection.**~~ Resolved and
+   tested; see §2. It needed one amendment (class-centering, to fix the gauge
+   on the padded tree's single-branch nodes).
+3. ~~**ImageNet timing is extrapolated**, never measured.~~ Measured; see the
+   Hour 0–1 tables. The extrapolation was badly wrong in one place:
+   `remax_laplace_diag` costs 14.1 min/epoch at 1000 classes, roughly 5× the
+   other heads, because its diagonal Laplace Jacobian scales with K.
 4. **`hrc` on ImageNet was catastrophic** in the earlier 1-epoch screens:
    acc 0.4232, NLL 2.7443 against a 0.6976 softmax reference. If that
    reproduces, it is a genuine scaling result about the hierarchical tree at
@@ -245,3 +314,51 @@ groups, best above n≈3000.
   `config.json` and `selection.json` were kept, so old sweeps still read back.
 - `experiments/scaling_theory_stage2` (3.9 GB) is untracked, unbacked and
   awaiting a delete/keep decision. Unrelated to this plan.
+
+---
+
+## 8. Preliminary signal from the Hour 0–1 timing probes
+
+These are **single cells, not the screen**: seed 0, 20 epochs, gain 0.3,
+`sigma_v` 0.1, one cell per (head, init). They are recorded because they
+already answer the question the study asks, and because they tell the screen
+what to look for. Validation top-1 / NLL:
+
+| head | dataset | `random` | `zero` | `backbone` |
+|---|---|---|---|---|
+| `remax_lognormal` | CIFAR-10 | 0.9520 / 0.4029 | 0.9524 / 0.3439 | 0.9528 / 0.3571 |
+| `remax_laplace_diag` | CIFAR-10 | 0.9525 / 0.2912 | 0.9526 / 0.2264 | 0.9529 / 0.6233 |
+| `hrc` | CIFAR-10 | 0.9520 / 0.1668 | 0.9525 / 0.1665 | 0.9499 / 0.1757 |
+| `logit_tagiv` | CIFAR-10 | 0.9539 / 0.1770 | 0.9539 / 0.1770 | 0.9539 / 0.1771 |
+| `remax_lognormal` | CIFAR-100 | **0.5271** / 2.4907 | **0.7471** / 2.0277 | 0.7473 / 2.1615 |
+| `remax_laplace_diag` | CIFAR-100 | **0.5220** / 2.7391 | **0.7533** / 2.2433 | 0.7501 / 3.2509 |
+| `hrc` | CIFAR-100 | 0.7248 / 1.3296 | 0.7284 / 1.3048 | 0.7213 / 1.4180 |
+| `logit_tagiv` | CIFAR-100 | 0.7628 / 0.9620 | 0.7628 / 0.9620 | 0.7636 / 0.9640 |
+
+Three things to carry into the screen:
+
+1. **The headline is the remax heads at 100 classes.** Going from `random` to
+   `zero` means is worth **+22 accuracy points** on CIFAR-100
+   (`remax_lognormal` 0.527 → 0.747, `remax_laplace_diag` 0.522 → 0.753) at
+   20 epochs, and it costs nothing to do. On CIFAR-10 the same change is worth
+   ~0.0005. The effect is a function of class count, which is exactly why the
+   study needed three datasets, and it makes the ImageNet arm the interesting
+   one rather than a formality. Check whether it is a *rate* effect that 200
+   epochs closes, or a floor the head never leaves — the confirm stage at 200
+   epochs answers this, and the answer changes the recommendation.
+
+2. **`backbone` is not the best arm, and it hurts calibration.** Accuracy
+   ties `zero` or beats it slightly, but NLL is consistently worse, badly so
+   for `remax_laplace_diag` (0.2264 → 0.6233 on CIFAR-10; 2.2433 → 3.2509 on
+   CIFAR-100). Mechanism, worth a slide: the trained `fc` weights have RMS
+   0.082 (CIFAR-10), 0.059 (CIFAR-100), 0.069 (ImageNet), i.e. 1.3–1.9× the He
+   *mean* scale but **4–6× the prior standard deviation** `gain · scale` at
+   gain 0.3 = 0.0133. The warm start therefore places the mean 4–6 prior
+   sigmas out, and the posterior is over-committed before it sees data. This
+   predicts `backbone` should look much better at gain 1.0 — the gain axis and
+   the init axis interact, so read table 2 at more than one gain.
+
+3. **`logit_tagiv` is insensitive to all of it** (0.1770 / 0.1770 / 0.1771).
+   Expected for a distillation head: it regresses the teacher's logits, so the
+   teacher determines the fixed point regardless of where the mean starts.
+   Say so rather than presenting three near-identical numbers as a null result.

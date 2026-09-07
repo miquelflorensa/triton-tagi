@@ -63,6 +63,7 @@ from .hrc_softmax import (
     labels_to_hrc_mask,
     obs_to_class_probs,
     obs_to_class_probs_tagiv,
+    project_classes_to_nodes,
 )
 from .hsm_calibration import (
     DEFAULT_GAIN_ORDER,
@@ -218,6 +219,7 @@ __all__ = [
     "labels_to_hrc_mask",
     "obs_to_class_probs",
     "obs_to_class_probs_tagiv",
+    "project_classes_to_nodes",
     "get_predicted_labels",
     # Calibrated hierarchical probit
     "DEFAULT_LOG_TAU",
