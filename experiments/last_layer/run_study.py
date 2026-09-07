@@ -927,6 +927,27 @@ def _t_critical_95(sample_count: int) -> float:
     return table.get(sample_count, 1.96 if sample_count > 30 else 2.262)
 
 
+CONFIG_IDENTITY_FIELDS = ("stage", "mean_init", "gain_w", "gain_b", "sigma_v")
+
+
+def config_identity(config: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the config fields that identify a study cell, blank when absent.
+
+    The init study evaluates several cells per (dataset, head) -- the selected
+    initialization arm and its ``random`` counterpart -- so these fields have to
+    travel into the report and into the summary group key, or the arms average
+    together. Runs predating an axis leave its field blank rather than claiming
+    a value that was never recorded.
+    """
+
+    config = config or {}
+    identity = {}
+    for field in CONFIG_IDENTITY_FIELDS:
+        value = config.get(field)
+        identity[field] = "" if value is None else value
+    return identity
+
+
 def evaluation_kinds(epoch: int, selection_epoch: int, final_epoch: int) -> list[str]:
     """Return every report group to which an evaluated checkpoint belongs."""
 
@@ -950,6 +971,7 @@ def report_study(args, manifest: dict[str, Any]) -> None:
                     "head": "pytorch_softmax",
                     "seed": "",
                     "evaluation_kind": "fixed_baseline",
+                    **config_identity(None),
                 }
             ]
         elif "config" in payload:
@@ -967,6 +989,7 @@ def report_study(args, manifest: dict[str, Any]) -> None:
                     "epoch": epoch,
                     "evaluation_kind": kind,
                     "checkpoint": payload["checkpoint"],
+                    **config_identity(payload["config"]),
                 }
                 for kind in kinds
             ]
@@ -1002,12 +1025,24 @@ def report_study(args, manifest: dict[str, Any]) -> None:
         "epoch",
         "evaluation_kind",
         "checkpoint",
+        *CONFIG_IDENTITY_FIELDS,
     }
-    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        groups[(row["dataset"], row["head"], row["evaluation_kind"])].append(row)
+        groups[
+            (
+                row["dataset"],
+                row["head"],
+                row["evaluation_kind"],
+                *(str(row[field]) for field in CONFIG_IDENTITY_FIELDS),
+            )
+        ].append(row)
     summaries = []
-    for (dataset, head, evaluation_kind), group in sorted(groups.items()):
+    for group_key, group in sorted(groups.items()):
+        dataset, head, evaluation_kind = group_key[:3]
+        cell = dict(zip(CONFIG_IDENTITY_FIELDS, group_key[3:]))
+        for field in CONFIG_IDENTITY_FIELDS:
+            cell[field] = group[0][field]
         metric_names = sorted(
             {
                 key
@@ -1033,6 +1068,7 @@ def report_study(args, manifest: dict[str, Any]) -> None:
                     "dataset": dataset,
                     "head": head,
                     "evaluation_kind": evaluation_kind,
+                    **cell,
                     "metric": metric,
                     "n": count,
                     "mean": mean,

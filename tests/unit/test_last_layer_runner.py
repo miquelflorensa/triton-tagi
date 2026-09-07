@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -165,3 +166,116 @@ def test_single_configuration_runner_writes_resumable_artifacts(tmp_path):
     assert (runs[0] / "history.json").exists()
     assert (runs[0] / "checkpoints" / "epoch_0000.pt").exists()
     assert (runs[0] / "checkpoints" / "epoch_0001.pt").exists()
+
+
+def _write_evaluation(root, *, head, mean_init, seed, accuracy, nll):
+    """Write the minimum evaluation payload that report_study reads."""
+
+    payload = {
+        "config": {
+            "dataset": "cifar10",
+            "head": head,
+            "seed": seed,
+            "epochs": 200,
+            "stage": "init_confirm",
+            "mean_init": mean_init,
+            "gain_w": 0.3,
+            "gain_b": 0.3,
+            "sigma_v": 0.1,
+        },
+        "checkpoint": f"{head}/{mean_init}/seed{seed}",
+        "metadata": {"epoch": 200},
+        "selection_epoch": 200,
+        "clean_and_svhn": {
+            "classification": {"accuracy": accuracy, "nll": nll},
+        },
+        "corruptions": {},
+    }
+    destination = root / head / f"{mean_init}_seed{seed}" / "epoch_0200.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(payload))
+
+
+def test_report_keeps_initialization_arms_apart(tmp_path):
+    """Two init arms of one head must not average into a single summary row.
+
+    ``init_confirm`` evaluates the selected initialization arm *and* its
+    ``random`` counterpart for the same (dataset, head), so a summary grouped
+    only by (dataset, head, evaluation_kind) would report their mean and hide
+    the very delta the study measures.
+    """
+
+    manifest = {"study_id": "smoke", "paths": {"artifacts": str(tmp_path)}}
+    evaluations = tmp_path / "smoke" / "evaluations" / "cifar10"
+    for seed in (0, 1):
+        _write_evaluation(
+            evaluations, head="remax_lognormal", mean_init="zero",
+            seed=seed, accuracy=0.75, nll=2.0,
+        )
+        _write_evaluation(
+            evaluations, head="remax_lognormal", mean_init="random",
+            seed=seed, accuracy=0.53, nll=2.5,
+        )
+
+    runner.report_study(SimpleNamespace(), manifest)
+
+    summary = json.loads(
+        (tmp_path / "smoke" / "report_summary.json").read_text()
+    )
+    accuracy = {
+        row["mean_init"]: row
+        for row in summary
+        if row["metric"] == "clean_svhn_classification_accuracy"
+    }
+    assert set(accuracy) == {"zero", "random"}
+    assert accuracy["zero"]["mean"] == pytest.approx(0.75)
+    assert accuracy["random"]["mean"] == pytest.approx(0.53)
+    assert accuracy["zero"]["n"] == 2
+    assert accuracy["random"]["n"] == 2
+
+    report = json.loads((tmp_path / "smoke" / "report.json").read_text())
+    assert {row["mean_init"] for row in report} == {"zero", "random"}
+    assert {row["gain_w"] for row in report} == {0.3}
+    assert {row["stage"] for row in report} == {"init_confirm"}
+
+
+def test_report_leaves_unrecorded_axes_blank(tmp_path):
+    """A run predating an axis reports it blank, not as an invented value."""
+
+    manifest = {"study_id": "smoke", "paths": {"artifacts": str(tmp_path)}}
+    evaluations = tmp_path / "smoke" / "evaluations" / "cifar10"
+    destination = evaluations / "hrc" / "legacy" / "epoch_0200.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(
+            {
+                "config": {
+                    "dataset": "cifar10",
+                    "head": "hrc",
+                    "seed": 0,
+                    "epochs": 200,
+                    "gain_w": 0.3,
+                    "gain_b": 0.3,
+                    "sigma_v": None,
+                },
+                "checkpoint": "legacy",
+                "metadata": {"epoch": 200},
+                "clean_and_svhn": {"classification": {"accuracy": 0.95}},
+                "corruptions": {},
+            }
+        )
+    )
+
+    runner.report_study(SimpleNamespace(), manifest)
+
+    report = json.loads((tmp_path / "smoke" / "report.json").read_text())
+    # The final checkpoint is also the validation-selected one, so it reports
+    # under both evaluation kinds; every row must leave the axes blank.
+    assert {row["evaluation_kind"] for row in report} == {
+        "validation_selected",
+        "epoch_200",
+    }
+    assert {row["mean_init"] for row in report} == {""}
+    assert {row["sigma_v"] for row in report} == {""}
+    assert {row["stage"] for row in report} == {""}
+    assert {row["gain_w"] for row in report} == {0.3}
