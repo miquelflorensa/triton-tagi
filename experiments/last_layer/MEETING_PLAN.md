@@ -338,6 +338,43 @@ are bit-identical for it (§2).
    "initialize however you like and calibrate", which is a *different* slide
    from "never use He means on a many-class last layer".
 
+6. **The validation-sweep calibration for HRC** — already computed, from
+   `runs/last_layer/hsm_calibration/{cifar10,cifar100}_base_hrc/report.csv`.
+   Test NLL against the size of the split the gain is fitted on:
+
+   | dataset | arm (groups) | n=100 | n=300 | n=1000 | n=3000 | n=10000 |
+   |---|---|---|---|---|---|---|
+   | CIFAR-10 | uncalibrated | 0.1893 | 0.1893 | 0.1893 | 0.1893 | 0.1893 |
+   | | `hsm_global` (1) | 0.1956 | 0.1899 | 0.1901 | 0.1896 | 0.1891 |
+   | | `hsm_level` (4) | 0.2043 | 0.1869 | 0.1845 | 0.1825 | **0.1818** |
+   | | `hsm_node` (9) | 0.2123 | 0.1910 | 0.1852 | 0.1814 | **0.1802** |
+   | CIFAR-100 | uncalibrated | 1.3150 | 1.3150 | 1.3150 | 1.3150 | 1.3150 |
+   | | `hsm_global` (1) | 1.3170 | 1.3152 | 1.3149 | 1.3153 | 1.3149 |
+   | | `hsm_level` (7) | 1.2301 | 1.2092 | 1.2035 | 1.2012 | **1.2003** |
+   | | `hsm_node` (99) | 1.4105 | 1.2882 | 1.2268 | 1.2044 | **1.1943** |
+
+   Four things to say with it:
+
+   - **The crossover is real.** Per-node is *worse* than uncalibrated below
+     n≈1000 (CIFAR-100 1.4105 vs 1.3150 at n=100 — one visit per node at 99
+     groups) and best above n≈3000.
+   - **`hsm_level` is the recommendation at a fixed budget.** It beats
+     uncalibrated from n=300 up on both datasets and beats per-node
+     everywhere below n≈3000, with 4 and 7 groups.
+   - **A global gain does nothing on CIFAR-100** (1.3149 vs 1.3150), i.e. the
+     α = 3 convention already sits at the global optimum. The gain belief only
+     pays once it can vary *across* the tree.
+   - **It buys likelihood, not bin-wise calibration.** Test ECE: CIFAR-10
+     uncalibrated 0.0049 and every calibrated arm is worse at every n;
+     CIFAR-100 flat at 0.087-0.098 except per-node at n=100, which is 0.1853.
+     And softmax temperature scaling still beats all of it on NLL (0.1734 /
+     0.9541 vs HRC's best 0.1802 / 1.1943) — say so rather than letting a
+     supervisor find it.
+
+   This is the sweep that tells axis 4 whether its single n = 10 000 fit is in
+   the data-rich regime. It is, for `global` and `level`; per-node at 99
+   groups sits right at the edge.
+
 Plus the calibration slide that is **already finished** and needs no compute —
 base HRC uncalibrated vs global / per-level / per-node gain, from
 `runs/last_layer/hsm_calibration/{cifar10,cifar100}_base_hrc/report.csv`.
@@ -525,10 +562,74 @@ on CIFAR-100.
    added.
 6. **§8 note 2 was wrong and is corrected in place.** See §8.
 
+### The epoch-0 trap, and what it says about three of the four heads
+
+Found while previewing what `select` would choose, and it is the most
+consequential thing session 2 turned up.
+
+`select_stage` could pick **epoch 0**, the prior before any data. For the
+`random` and `zero` arms that is a chance-level model that never wins, which
+is why the hole survived. For `backbone` epoch 0 is not untrained at all — it
+is the backbone's own trained `fc` read through the head's link — so it scores
+like the baseline it copies: CIFAR-10 `remax_lognormal` 0.9539 / 0.1913 at
+epoch 0 against `pytorch_softmax` 0.9500 / 0.1941.
+
+**And it was winning.** Best validation NLL fell at epoch 0 in 7/12
+`remax_lognormal` backbone cells, 11/12 `remax_laplace_diag`, 4/4
+`logit_tagiv` on CIFAR-10. The study was on course to select untrained cells,
+confirm them at 200 epochs, and report its own baseline as a TAGI result.
+
+**Decided (2026-09-07):** epoch 0 is excluded from selection, matching
+`run_imagenet_init_study.py`, which already skipped it. The warm start is
+reported in its own table instead — it needs no seeds, since nothing has
+trained and the prior variances are a deterministic function of gain.
+
+The wider finding, which is *not* an initialization result and must not be
+presented as one:
+
+| dataset | head | epoch 0 NLL | best trained NLL | at epoch |
+|---|---|---|---|---|
+| CIFAR-10 | `hrc` | 0.6846 | **0.1733** | 20 |
+| CIFAR-10 | `hrc:full` | 0.4559 | **0.1878** | 20 |
+| CIFAR-10 | `remax_lognormal` | **0.1913** | 0.2000 | 1 |
+| CIFAR-10 | `remax_laplace_diag` | **0.1969** | 0.2514 | 1 |
+| CIFAR-10 | `logit_tagiv` | **0.1739** | 0.1767 | 1 |
+| CIFAR-100 | `hrc` | 1.6503 | **1.3683** | 20 |
+| CIFAR-100 | `remax_lognormal` | 1.8647 | **1.3068** | 2 |
+| CIFAR-100 | `logit_tagiv` | **0.9575** | 0.9639 | 1 |
+
+So on CIFAR-10 the untrained warm start beats every trained checkpoint for all
+three non-hierarchical heads, while `hrc` trains properly and enormously.
+Those three heads peak at epoch 1-2 and decay after, with mean confidence
+climbing to 0.99 at flat accuracy — the 20-epoch screen and the 200-epoch
+confirm both read them well past their best. **Decided:** run confirm at 200
+epochs as planned anyway; its checkpoint list already includes epochs 1, 2 and
+3, so `evaluate` will report each head's true optimum and the 200-epoch
+horizon side by side, with five seeds on both.
+
 ### The open questions, updated
 
-1. **Is the +22 point gap a rate effect or a floor?** Still the most important
-   thing `init_confirm` answers, and still unanswered.
+1. ~~Is the +22 point gap a rate effect or a floor?~~ **Neither — it was a
+   gain confound, and it is largely gone.** The §8 probe sat at gain 0.3 /
+   `sigma_v` 0.1, where `remax_lognormal` random is 0.5271 and zero 0.7471.
+   Tuning gain per arm on the finished CIFAR-100 grid, random reaches 0.7587
+   (gain 0.03) and `remax_laplace_diag` random reaches 0.7482 (gain 1.0), so
+   the accuracy gap essentially closes. He random means are not on a floor and
+   are not merely slow: they need a *particular* gain, and the probe used the
+   wrong one for them.
+
+   What survives, and is the better result: **`zero` is the arm that does not
+   care.** `remax_laplace_diag` zero is 0.7550 / 1.569 at every one of the
+   four gains, identical to four decimals, while random spans 0.4007 to 0.7482
+   — a 35-point accuracy range. Recommend `zero` for insensitivity, not for a
+   better optimum.
+
+   Still open at full protocol: whether that holds at 200 epochs, and whether
+   selection on NLL is even the right rule here — on CIFAR-100 it prefers
+   badly underconfident cells (`remax_lognormal` backbone gain 0.03: NLL
+   1.582, ECE 0.440, mean confidence 0.3235 at 76% accuracy, against gain 0.3
+   at NLL 1.649 and ECE 0.045). Worth raising: for a calibration study, NLL
+   with Brier and ECE only as tiebreakers rewards hedging.
 2. ~~Init and gain interact.~~ **Answered, and the plan's predicted direction
    was backwards.** See §8. Supersedes the old note: read table 3 as "which
    prior width does each arm want", and lead with `zero`'s flatness.
