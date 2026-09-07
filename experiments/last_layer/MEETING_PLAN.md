@@ -362,3 +362,139 @@ Three things to carry into the screen:
    Expected for a distillation head: it regresses the teacher's logits, so the
    teacher determines the fixed point regardless of where the mean starts.
    Say so rather than presenting three near-identical numbers as a null result.
+
+---
+
+## 9. Handoff — state as of 2026-09-07, end of session 1
+
+Hour 0–1 is complete and both blockers are gone. No screen has been run yet:
+the CIFAR screen was started, found to be ~10x slower per cell than the
+measurement predicted, stopped, and the cause fixed (see "What changed" #4).
+It is ready to relaunch.
+
+### What is done
+
+1. **torchvision installed** — `0.29.0+cu130`, `torch 2.14.0+cu130` untouched.
+2. **`mean_init` implemented and tested** — `triton_tagi/classification.py`,
+   plus `project_classes_to_nodes` in `hrc_softmax.py`. 30 tests in
+   `tests/unit/test_last_layer_mean_init.py`. See §2.
+3. **Throughput measured** on both datasets and on ImageNet. See §4.
+4. **`classwise_calibration_error` rewritten** — it looped over classes x bins
+   with a device sync per bin, costing 4.6 s per evaluation on CIFAR-100. With
+   21 evaluations per cell that was ~100 s of a ~150 s cell, and at 1000
+   classes it would have made the ImageNet arm impractical. It now uses one
+   `scatter_add` and the identity
+   `(count/N) * |mean_t - mean_c| = |sum_t - sum_c| / N`. **19x faster at 100
+   classes, 716x at 1000**, equal to the old definition to float32 precision.
+   The old double loop is kept in `tests/unit/test_metrics.py` as the
+   definition the fast path must agree with. Suite: **491 passed**.
+5. **CIFAR driver plumbed** — `run_study.py` gained stages `init_screen` and
+   `init_confirm`, the `init_study` section of `study.json` (116 cells per
+   dataset), backbone `fc` loading for the warm-start arm, and teacher-logit
+   training for `logit_tagiv`. `select_stage` now carries `mean_init` into its
+   selection; **without that fix every confirm run would have silently fallen
+   back to `random` means.** Verified end to end on a 2-epoch grid
+   (screen -> select -> confirm configs), whose artifacts were then deleted.
+6. **ImageNet driver written** — `run_imagenet_init_study.py` +
+   `imagenet_init_study.json`, 60 cells. Streams `features_shuffled` shard by
+   shard, because ImageNet will not fit the way `run_study.py` holds CIFAR.
+   Splits across both GPUs with `--gpu-shard i --gpu-shards 2`.
+   **Not yet run at all** — not even one cell.
+7. **Two decisions taken** (§1 tree decision, §6 gap 1) and **three gaps
+   closed** (§6 gaps 1–3).
+8. **Preliminary result in hand** — §8. Zero means beat He random means by
+   **+22 accuracy points** for the remax heads on CIFAR-100 at 20 epochs.
+
+Commits: `a8b6bcd` (mean_init, tests, measured budgets), `d1a4968` (drivers,
+classwise ECE). Working tree clean; nothing in `runs/` was deleted except two
+of my own smoke/timing trees, described below.
+
+### What remains
+
+**Day 1 — CIFAR.** Relaunch the screen. 6 of 232 cells are already complete
+and the driver skips completed runs, so this is safe to just re-run:
+
+    python experiments/last_layer/run_study.py run --dataset cifar10  --stage init_screen
+    python experiments/last_layer/run_study.py run --dataset cifar100 --stage init_screen
+
+**Run these sequentially, not one per GPU.** The workload is CPU-launch-bound,
+not GPU-bound: TAGI issues ~3000 small kernel launches per epoch from Python,
+so two workers on two GPUs starve each other on CPU rather than running twice
+as fast. That, together with the old `classwise_ece`, is what made the first
+attempt look 10x slow — 150 s per cell instead of the 20 s predicted.
+
+**Measured per-cell cost, uncontended, with the `classwise_ece` fix**
+(CIFAR-100, 20 epochs, through the driver, so including the 21 validation
+evaluations, the per-epoch native diagnostics and 6 checkpoint saves that the
+bare §4 numbers exclude):
+
+| head | seconds/cell |
+|---|---|
+| `remax_lognormal` | 43–50 |
+| `hrc` | 47–58 |
+| `remax_laplace_diag` | ~66 |
+
+So budget the CIFAR screen at **≈105 min for CIFAR-100 and ≈55 min for
+CIFAR-10, ~2.7 h sequential** — not the 70 min §4 implies, because §4 timed
+training only. The driver overhead is ~2.5x the bare training cost and is
+dominated by 21 full `classification_metrics` calls on CPU tensors; if that
+ever needs to come down, evaluate at fewer epochs rather than optimizing
+further.
+
+These timing cells also reproduced §8 exactly (`remax_lognormal` CIFAR-100
+`random` 0.5271 / 2.4907 vs `zero` 0.7471 / 2.0277), which confirms the driver
+path and the standalone probe agree.
+
+Then, per dataset:
+
+    python experiments/last_layer/run_study.py select   --dataset <ds> --stage init_screen
+    python experiments/last_layer/run_study.py run      --dataset <ds> --stage init_confirm
+    python experiments/last_layer/run_study.py evaluate  --dataset <ds>
+
+`init_confirm` runs the selected arm **and** its `random` counterpart per head
+(8 configs per dataset x 5 seeds x 200 epochs), which is what makes table 2 a
+full-protocol result rather than a 20-epoch one.
+
+**Day 1 night — ImageNet.** Never run; start with a single cell to confirm the
+measured 2.7–14.1 min/epoch still holds now that `classwise_ece` is fixed
+(the ImageNet numbers in §4 were measured *without* per-epoch validation, so
+they are training-only and slightly optimistic).
+
+    python experiments/last_layer/run_imagenet_init_study.py run --stage screen \
+        --gpu-shard 0 --gpu-shards 2   # and --gpu-shard 1 on the other GPU
+    python experiments/last_layer/run_imagenet_init_study.py select --stage screen
+    python experiments/last_layer/run_imagenet_init_study.py run --stage confirm
+    python experiments/last_layer/run_imagenet_init_study.py report
+
+**Day 2 — tables and deck.** The four tables of §5 plus the finished
+calibration slide. Nothing there is written yet.
+
+### Open questions for whoever picks this up
+
+1. **Is the +22 point gap a rate effect or a floor?** The single most
+   important thing the confirm stage answers. At 20 epochs `random` sits at
+   0.527 on CIFAR-100 and `zero` at 0.747; if 200 epochs closes that, the
+   recommendation is "converges anyway, but slowly", and if it does not, the
+   recommendation is "never use He means on a many-class last layer". These
+   are different slides.
+2. **Init and gain interact, and the grid can see it.** `backbone` places the
+   mean 4–6 prior sigmas out at gain 0.3 (§8 note 2), which predicts it should
+   look much better at gain 1.0. Read table 2 at more than one gain before
+   concluding `backbone` is simply worse.
+3. **`hrc` on ImageNet was catastrophic before** (§6 gap 4, acc 0.4232). Now
+   that `mean_init` exists, check whether `zero` or `backbone` rescues it. If
+   the failure was really a bad random prior over 1001 tree nodes, this is the
+   experiment that shows it, and it becomes a much better story than "the tree
+   does not scale".
+
+### Housekeeping
+
+- `runs/` is untouched apart from `heads/init_screen/`, which holds the 6
+  completed cells of the interrupted first screen attempt. Those are real
+  20-epoch runs on the final grid and the driver will skip them on relaunch.
+  Two throwaway trees (a 2-epoch smoke test and a timing scratch tree) were
+  created and deleted within this session; nothing else in `runs/` was
+  removed, and none of the ImageNet feature caches were touched.
+- `experiments/scaling_theory_stage2` (3.9 GB, untracked) still awaits its
+  delete/keep decision. Still unrelated to this plan.
+
