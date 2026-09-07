@@ -32,6 +32,39 @@ still speaks of 99 groups on CIFAR-100 while this study's `hrc` head has 102
 nodes. The two are not comparable node-for-node, and the deck must not imply
 they are.
 
+**Amended 2026-09-07 (session 2): `hrc` runs on BOTH trees.** The decision
+above stands for the headline row, but it turned out to exclude the whole
+calibration question: `gain_groups` — and therefore
+`calibrate_hsm_log_gain` at every sharing level — **rejects the padded tree
+outright**, with
+
+    ValueError: gain_groups requires a proper K-leaf tree from
+    class_to_obs_full; the padded tree of class_to_obs discards leaves that
+    hold probability mass
+
+Verified on GPU at K = 10: padded is refused at `global`, `level` and `node`;
+full fits all three and the calibrated rows sum to one. Only
+`calibrate_hrc_log_tau`, the *point-value* ablation, accepts the padded tree,
+and that is explicitly not the gain-belief method.
+
+So the grid now crosses `hrc` with `hrc_trees = ["padded", "full"]`:
+
+| arm | selection key | nodes (10 / 100 / 1000) | role |
+|---|---|---|---|
+| padded | `hrc` | 11 / 102 / 1001 | headline row; the v2 gain selections transfer |
+| full | `hrc:full` | 9 / 99 / 999 | the calibratable arm, and node-for-node comparable with the finished calibration slide |
+
+This retires the non-comparability caveat above **for the `hrc:full` arm
+only**: at 99 nodes on CIFAR-100 it is the same tree the calibration slide
+used. The padded row still is not comparable node-for-node, and the deck must
+keep saying so for that row.
+
+The padded arm deliberately emits **no** `hrc_tree` key, so its run hash still
+matches the 116 cells per dataset already on disk; verified that the new
+152-cell grid matches all 116 existing CIFAR-10 runs, will run exactly the 36
+new full-tree cells, and orphans nothing. A blank `hrc_tree` in the report
+means "the head's default tree", which for `hrc` is padded.
+
 `hrc_probit`, `hrc_tagiv`, `categorical_tagiv`, `probit_ovr` and
 `remax_laplace` are still importable but are **not** part of this study.
 `hrc_probit.py` must stay: `hsm_calibration` imports `hrc_log_probs` from it.
@@ -134,6 +167,34 @@ backbone the whole grid is flat (val NLL 0.1665–0.1730); on CIFAR-100 it
 matters (1.330 → 1.900). Expect ImageNet to behave like CIFAR-100 or worse.
 
 ---
+
+### Axis 4 — HSM gain calibration (added 2026-09-07, session 2)
+
+Requested during the meeting prep, and it is the axis that asks whether the
+initialization effect survives calibration — a fair question, since `zero` and
+`backbone` differ mainly in **calibration** (NLL / ECE) rather than accuracy.
+
+This is the hierarchical probit calibration of Goulet, Nguyen and
+Florensa-Montilla: a Gaussian belief over each group's positive-branch log
+gain, fitted on a split disjoint from training with the network frozen, and
+*integrated over* at prediction rather than plugged in. `prior_mean = 0` is
+the uncalibrated head, so the `evaluate` rows are the baseline these read
+against.
+
+| setting | value | why |
+|---|---|---|
+| sharing | `global`, `level`, `node` — all three | mirrors the finished calibration study, so the two are directly comparable on the `hrc:full` arm |
+| fit split | the full 10 000-row validation split | decided; maximum data for the fit. **Caveat for the caption:** it is the same split that selected the cell |
+| eligible runs | `hrc:full` only | the padded tree is refused; the remax and logit heads have no tree gain to fit |
+| groups | 1 / 4 / 9 at K=10, 1 / 7 / 99 at K=100, 1 / 10 / 999 at K=1000 | per-node is data-starved on ImageNet: 999 groups against 25 000 validation rows |
+
+Driver: `run_study.py calibrate --dataset <ds> --stage init_confirm`, which
+fits the gain and re-evaluates clean + SVHN + corruptions through
+`hsm_class_moments`, so the calibrated rows carry the **native epistemic** OOD
+column too, reduced exactly as `predict_batches` reduces the uncalibrated
+head's. The sharing level rides in the run config as `calibration`, so it
+reaches `report.csv` as its own column and never averages into the
+uncalibrated row.
 
 ## 3. Metrics — every cell reports all three families
 
@@ -269,6 +330,14 @@ are bit-identical for it (§2).
 4. **sigma_v sensitivity.** Small table, fixed-noise heads only, with the
    flatness on CIFAR-10 vs the real sensitivity on CIFAR-100 called out.
 
+5. **Calibration × initialization** (new, axis 4). For the `hrc:full` arm:
+   uncalibrated vs `global` vs `level` vs `node`, each at all three init arms,
+   on CIFAR-10 and CIFAR-100. The question it answers: does the
+   initialization delta survive calibration, or does a fitted gain absorb it?
+   If a global gain absorbs the whole init effect, the recommendation becomes
+   "initialize however you like and calibrate", which is a *different* slide
+   from "never use He means on a many-class last layer".
+
 Plus the calibration slide that is **already finished** and needs no compute —
 base HRC uncalibrated vs global / per-level / per-node gain, from
 `runs/last_layer/hsm_calibration/{cifar10,cifar100}_base_hrc/report.csv`.
@@ -358,6 +427,44 @@ Three things to carry into the screen:
    predicts `backbone` should look much better at gain 1.0 — the gain axis and
    the init axis interact, so read table 2 at more than one gain.
 
+   **MEASURED, AND THE PREDICTION WAS BACKWARDS (session 2).** The full
+   CIFAR-10 grid is in, and `backbone` gets monotonically *better as gain
+   falls*, not as it rises. Val NLL at 20 epochs, each arm at its best
+   `sigma_v`:
+
+   | head | arm | gain 0.03 | gain 0.1 | gain 0.3 | gain 1.0 |
+   |---|---|---|---|---|---|
+   | `remax_lognormal` | random | 0.5008 | 0.4730 | 0.3687 | **0.2932** |
+   | | zero | 0.3174 | 0.3153 | 0.3034 | **0.2907** |
+   | | backbone | **0.2027** | 0.2098 | 0.2645 | 0.3276 |
+   | `remax_laplace_diag` | random | 1.4256 | 1.1686 | 0.2912 | **0.2002** |
+   | | zero | **0.1973** | 0.1983 | 0.1983 | 0.1983 |
+   | | backbone | **0.2607** | 0.2954 | 0.7189 | — |
+   | `hrc` (padded) | random | 0.1673 | 0.1666 | **0.1665** | 0.1666 |
+   | | zero | 0.1668 | **0.1662** | **0.1662** | 0.1666 |
+   | | backbone | 0.1805 | 0.1763 | **0.1733** | 0.1746 |
+
+   The mechanism above is right about the magnitudes and wrong about what
+   follows from them. A warm start does not want a prior wide enough to
+   contain it; it wants one **tight enough to keep it**, so the data cannot
+   pull the mean off a solution that is already good. Read the other way, the
+   arms disagree about which prior they want: `random` needs a loose one,
+   `backbone` a tight one, and that is why the two axes cannot be tuned
+   independently.
+
+   **The real headline is robustness, not the best cell.** `zero` is the only
+   arm that is flat in gain — `remax_laplace_diag` sits at 0.1973–0.1983
+   across the whole axis, while `random` swings from 1.4256 to 0.2002, a
+   7-fold NLL range. So `zero` does not merely win by a little; it removes a
+   tuning axis. That is a stronger recommendation than the +22 points, and it
+   is the one to lead with.
+
+   **And CIFAR-10's flatness in §8 was gain-confounded.** Tuning gain per arm
+   collapses the init effect to nothing there (`hrc` 0.1665 vs 0.1662). The
+   single-gain probes in the table above were reading an interaction, not a
+   main effect. Whether the CIFAR-100 effect survives per-arm gain tuning is
+   the thing the finished screen answers.
+
 3. **`logit_tagiv` is insensitive to all of it** (0.1770 / 0.1770 / 0.1771).
    Expected for a distillation head: it regresses the teacher's logits, so the
    teacher determines the fixed point regardless of where the mean starts.
@@ -365,136 +472,90 @@ Three things to carry into the screen:
 
 ---
 
-## 9. Handoff — state as of 2026-09-07, end of session 1
+## 9. Handoff — state as of 2026-09-07, end of session 2
 
-Hour 0–1 is complete and both blockers are gone. No screen has been run yet:
-the CIFAR screen was started, found to be ~10x slower per cell than the
-measurement predicted, stopped, and the cause fixed (see "What changed" #4).
-It is ready to relaunch.
+Session 1's handoff is preserved in git (`6ef20ff`); this replaces it.
 
-### What is done
+### Where the compute is
 
-1. **torchvision installed** — `0.29.0+cu130`, `torch 2.14.0+cu130` untouched.
-2. **`mean_init` implemented and tested** — `triton_tagi/classification.py`,
-   plus `project_classes_to_nodes` in `hrc_softmax.py`. 30 tests in
-   `tests/unit/test_last_layer_mean_init.py`. See §2.
-3. **Throughput measured** on both datasets and on ImageNet. See §4.
-4. **`classwise_calibration_error` rewritten** — it looped over classes x bins
-   with a device sync per bin, costing 4.6 s per evaluation on CIFAR-100. With
-   21 evaluations per cell that was ~100 s of a ~150 s cell, and at 1000
-   classes it would have made the ImageNet arm impractical. It now uses one
-   `scatter_add` and the identity
-   `(count/N) * |mean_t - mean_c| = |sum_t - sum_c| / N`. **19x faster at 100
-   classes, 716x at 1000**, equal to the old definition to float32 precision.
-   The old double loop is kept in `tests/unit/test_metrics.py` as the
-   definition the fast path must agree with. Suite: **491 passed**.
-5. **CIFAR driver plumbed** — `run_study.py` gained stages `init_screen` and
-   `init_confirm`, the `init_study` section of `study.json` (116 cells per
-   dataset), backbone `fc` loading for the warm-start arm, and teacher-logit
-   training for `logit_tagiv`. `select_stage` now carries `mean_init` into its
-   selection; **without that fix every confirm run would have silently fallen
-   back to `random` means.** Verified end to end on a 2-epoch grid
-   (screen -> select -> confirm configs), whose artifacts were then deleted.
-6. **ImageNet driver written** — `run_imagenet_init_study.py` +
-   `imagenet_init_study.json`, 60 cells. Streams `features_shuffled` shard by
-   shard, because ImageNet will not fit the way `run_study.py` holds CIFAR.
-   Splits across both GPUs with `--gpu-shard i --gpu-shards 2`.
-   **Not yet run at all** — not even one cell.
-7. **Two decisions taken** (§1 tree decision, §6 gap 1) and **three gaps
-   closed** (§6 gaps 1–3).
-8. **Preliminary result in hand** — §8. Zero means beat He random means by
-   **+22 accuracy points** for the remax heads on CIFAR-100 at 20 epochs.
-
-Commits: `a8b6bcd` (mean_init, tests, measured budgets), `d1a4968` (drivers,
-classwise ECE). Working tree clean; nothing in `runs/` was deleted except two
-of my own smoke/timing trees, described below.
-
-### What remains
-
-**Day 1 — CIFAR.** Relaunch the screen. 6 of 232 cells are already complete
-and the driver skips completed runs, so this is safe to just re-run:
-
-    python experiments/last_layer/run_study.py run --dataset cifar10  --stage init_screen
-    python experiments/last_layer/run_study.py run --dataset cifar100 --stage init_screen
-
-**Run these sequentially, not one per GPU.** The workload is CPU-launch-bound,
-not GPU-bound: TAGI issues ~3000 small kernel launches per epoch from Python,
-so two workers on two GPUs starve each other on CPU rather than running twice
-as fast. That, together with the old `classwise_ece`, is what made the first
-attempt look 10x slow — 150 s per cell instead of the 20 s predicted.
-
-**Measured per-cell cost, uncontended, with the `classwise_ece` fix**
-(CIFAR-100, 20 epochs, through the driver, so including the 21 validation
-evaluations, the per-epoch native diagnostics and 6 checkpoint saves that the
-bare §4 numbers exclude):
-
-| head | seconds/cell |
+| stage | state |
 |---|---|
-| `remax_lognormal` | 43–50 |
-| `hrc` | 47–58 |
-| `remax_laplace_diag` | ~66 |
+| CIFAR-10 padded screen | **done**, 116/116 |
+| CIFAR-100 padded screen | running, ~103/116 |
+| CIFAR-10 + CIFAR-100 full-tree `hrc` arm | queued, 36 cells each, waits on the padded screen |
+| `select` both datasets | queued behind that |
+| `init_confirm` | **not started** — inspect the selections first, it is ~4.5 h |
+| `evaluate --stage init_confirm` | not started |
+| `calibrate --stage init_confirm` | not started |
+| ImageNet screen | **never run**, not one cell |
 
-So budget the CIFAR screen at **≈105 min for CIFAR-100 and ≈55 min for
-CIFAR-10, ~2.7 h sequential** — not the 70 min §4 implies, because §4 timed
-training only. The driver overhead is ~2.5x the bare training cost and is
-dominated by 21 full `classification_metrics` calls on CPU tensors; if that
-ever needs to come down, evaluate at fewer epochs rather than optimizing
-further.
+Measured cell cost, all-in through the driver (CIFAR-10, 20 epochs, ~29 s/cell
+average): `remax_lognormal` 4.8 s training, `hrc` 8.7 s, `logit_tagiv` 8.1 s,
+`remax_laplace_diag` 12.9 s; CIFAR-100 roughly 1.3-1.8x that. The full CIFAR-10
+screen took ~52 min, so §4's 70-min two-dataset estimate was optimistic mainly
+on CIFAR-100.
 
-These timing cells also reproduced §8 exactly (`remax_lognormal` CIFAR-100
-`random` 0.5271 / 2.4907 vs `zero` 0.7471 / 2.0277), which confirms the driver
-path and the standalone probe agree.
+### What session 2 changed
 
-Then, per dataset:
+1. **Report carries the cell identity** (`d0d8e55`). `report.csv` named rows by
+   `(dataset, head, seed, epoch, evaluation_kind)` and the summary grouped by
+   `(dataset, head, evaluation_kind)`. `init_confirm` evaluates **two arms per
+   head**, so both would have collapsed into one summary row reporting their
+   mean — the delta this study exists to measure, averaged away — and tables
+   2-4 had no gain or `sigma_v` column at all. Rows now carry
+   `stage/mean_init/hrc_tree/gain_w/gain_b/sigma_v/calibration`. Regenerating
+   the v2 report reproduces all 132 rows and 1664 summary rows unchanged.
+2. **`evaluate` can read the init tree** (`3bb25da`). It hardcoded
+   `stage_root(..., "confirm", ...)`, so the plan's own Day-2 command would
+   have re-evaluated the v2 runs and produced **no init rows at all**, leaving
+   every table empty with nothing visibly wrong. Now `--stage`.
+3. **ImageNet arm covered, and one duplicate cell dropped** (`1129a9b`). It
+   had no tests despite running unattended. Also `confirm_configs` paired
+   `logit_tagiv` with a `random` counterpart that is bit-identical to `zero`:
+   half an hour of the overnight window, and a delta of exactly zero reported
+   as though measured.
+4. **Axis 4 exists** — see §2. `hrc` now runs both trees (§1 amendment),
+   because the padded tree cannot be gain-calibrated at all.
+5. **`select` keeps the trees apart and carries `hrc_tree` forward.** Grouping
+   by head alone made padded and full compete for one slot, and the config
+   projection dropped `hrc_tree` — so a winning full-tree cell would have been
+   confirmed on the **padded** tree, silently, since padded is what `auto`
+   resolves to. This is the same failure mode as the `mean_init` fallback
+   session 1 fixed; the whitelist is the thing to check whenever an axis is
+   added.
+6. **§8 note 2 was wrong and is corrected in place.** See §8.
 
-    python experiments/last_layer/run_study.py select   --dataset <ds> --stage init_screen
-    python experiments/last_layer/run_study.py run      --dataset <ds> --stage init_confirm
-    python experiments/last_layer/run_study.py evaluate  --dataset <ds>
+### The open questions, updated
 
-`init_confirm` runs the selected arm **and** its `random` counterpart per head
-(8 configs per dataset x 5 seeds x 200 epochs), which is what makes table 2 a
-full-protocol result rather than a 20-epoch one.
-
-**Day 1 night — ImageNet.** Never run; start with a single cell to confirm the
-measured 2.7–14.1 min/epoch still holds now that `classwise_ece` is fixed
-(the ImageNet numbers in §4 were measured *without* per-epoch validation, so
-they are training-only and slightly optimistic).
-
-    python experiments/last_layer/run_imagenet_init_study.py run --stage screen \
-        --gpu-shard 0 --gpu-shards 2   # and --gpu-shard 1 on the other GPU
-    python experiments/last_layer/run_imagenet_init_study.py select --stage screen
-    python experiments/last_layer/run_imagenet_init_study.py run --stage confirm
-    python experiments/last_layer/run_imagenet_init_study.py report
-
-**Day 2 — tables and deck.** The four tables of §5 plus the finished
-calibration slide. Nothing there is written yet.
-
-### Open questions for whoever picks this up
-
-1. **Is the +22 point gap a rate effect or a floor?** The single most
-   important thing the confirm stage answers. At 20 epochs `random` sits at
-   0.527 on CIFAR-100 and `zero` at 0.747; if 200 epochs closes that, the
-   recommendation is "converges anyway, but slowly", and if it does not, the
-   recommendation is "never use He means on a many-class last layer". These
-   are different slides.
-2. **Init and gain interact, and the grid can see it.** `backbone` places the
-   mean 4–6 prior sigmas out at gain 0.3 (§8 note 2), which predicts it should
-   look much better at gain 1.0. Read table 2 at more than one gain before
-   concluding `backbone` is simply worse.
-3. **`hrc` on ImageNet was catastrophic before** (§6 gap 4, acc 0.4232). Now
-   that `mean_init` exists, check whether `zero` or `backbone` rescues it. If
-   the failure was really a bad random prior over 1001 tree nodes, this is the
-   experiment that shows it, and it becomes a much better story than "the tree
-   does not scale".
+1. **Is the +22 point gap a rate effect or a floor?** Still the most important
+   thing `init_confirm` answers, and still unanswered.
+2. ~~Init and gain interact.~~ **Answered, and the plan's predicted direction
+   was backwards.** See §8. Supersedes the old note: read table 3 as "which
+   prior width does each arm want", and lead with `zero`'s flatness.
+3. **Does calibration absorb the init effect?** New, and it is now the
+   question that decides the recommendation — deliverable table 5. If a global
+   gain absorbs the whole delta, the advice is "initialize however you like and
+   calibrate"; if it does not, it is "never use He means on a many-class last
+   layer".
+4. **`hrc` on ImageNet was catastrophic before** (§6 gap 4, acc 0.4232).
+   Unchanged, still untested.
 
 ### Housekeeping
 
-- `runs/` is untouched apart from `heads/init_screen/`, which holds the 6
-  completed cells of the interrupted first screen attempt. Those are real
-  20-epoch runs on the final grid and the driver will skip them on relaunch.
-  Two throwaway trees (a 2-epoch smoke test and a timing scratch tree) were
-  created and deleted within this session; nothing else in `runs/` was
-  removed, and none of the ImageNet feature caches were touched.
+- Nothing in `runs/` was deleted this session. The v2 `report.csv` /
+  `report_summary.csv` were **regenerated** in place after the schema change,
+  verified row-for-row identical on the shared columns; a pre-change copy is
+  in the session scratchpad, which is not durable.
+- `runs/last_layer/.../heads/init_screen/` is ~150 MB for the padded screen and
+  will roughly grow by a third with the full-tree arm.
+- The ImageNet inputs were pre-flighted: 129 train shards, 5 val shards,
+  `pretrained_fc.pt` and `feature_statistics.pt` all present under
+  `features_shuffled`, which is where the driver reads them. Note §2's table
+  says `features/pretrained_fc.pt`; both exist, and the driver uses the
+  `features_shuffled` copy.
+- GPU 1 is running unrelated user jobs (a streamlit app and
+  `next_token_predictor.py`). Everything here ran on GPU 0. The ImageNet
+  overnight queue can halve its wall clock with `--gpu-shards 2` **only** if
+  GPU 1 is free by then; one GPU at ~6.6 h still fits.
 - `experiments/scaling_theory_stage2` (3.9 GB, untracked) still awaits its
-  delete/keep decision. Still unrelated to this plan.
-
+  delete/keep decision. Still unrelated.

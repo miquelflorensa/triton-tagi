@@ -150,7 +150,7 @@
     "svhn": true
   },
   "init_study": {
-    "comment": "Mean-initialization study (MEETING_PLAN.md). Reuses the v2 features and backbones; writes to heads/init_screen and heads/init_confirm so the v2 screen/refine artifacts stay readable.",
+    "comment": "Mean-initialization study (MEETING_PLAN.md). Reuses the v2 features and backbones; writes to heads/init_screen and heads/init_confirm so the v2 screen/refine artifacts stay readable. hrc runs on both trees: the padded tree is the headline arm, and the full tree is the one HSM gain calibration accepts.",
     "fixed_noise_heads": [
       "hrc",
       "remax_lognormal",
@@ -158,6 +158,10 @@
     ],
     "logit_heads": [
       "logit_tagiv"
+    ],
+    "hrc_trees": [
+      "padded",
+      "full"
     ],
     "mean_init": [
       "random",

@@ -371,3 +371,150 @@ def test_evaluate_reads_the_requested_confirmation_stage(tmp_path, monkeypatch):
         for path in evaluations.glob("**/epoch_*.json")
     )
     assert written == ["init_confirm/hrc/hash_seed0/epoch_0007.json"]
+
+
+def _init_manifest(tmp_path):
+    return {
+        "study_id": "smoke",
+        "paths": {"artifacts": str(tmp_path)},
+        "last_layer": {"batch_size": 8, "diagnostic_cohort_size": 8},
+        "init_study": {
+            "fixed_noise_heads": ["hrc", "remax_lognormal"],
+            "logit_heads": ["logit_tagiv"],
+            "hrc_trees": ["padded", "full"],
+            "mean_init": ["random", "zero", "backbone"],
+            "tied_gains": [0.1, 0.3],
+            "sigma_v": [0.1],
+            "screen": {"seeds": [0], "epochs": 20, "checkpoints": [0, 20]},
+            "confirm": {"seeds": [0], "epochs": 200, "checkpoints": [0, 200]},
+        },
+    }
+
+
+def test_hrc_is_crossed_with_both_trees_and_nothing_else_is(tmp_path):
+    manifest = _init_manifest(tmp_path)
+    configs = runner.init_screen_configs(manifest)
+
+    hrc = [c for c in configs if c["head"] == "hrc"]
+    remax = [c for c in configs if c["head"] == "remax_lognormal"]
+    assert len(hrc) == 12  # 3 arms x 2 gains x 1 sigma_v x 2 trees
+    assert len(remax) == 6  # no tree to vary
+    assert all("hrc_tree" not in c for c in remax)
+    assert {c.get("hrc_tree") for c in hrc} == {None, "full"}
+
+
+def test_the_default_tree_arm_keeps_the_run_hash_of_the_cells_already_on_disk(tmp_path):
+    """The padded arm must not carry the key, or 116 finished cells re-run.
+
+    hrc_tree="auto" resolves to padded for the hrc head, so the cells already
+    computed recorded no hrc_tree at all. Emitting it explicitly would change
+    stable_hash and silently recompute an identical grid.
+    """
+
+    manifest = _init_manifest(tmp_path)
+    configs = runner.init_screen_configs(manifest)
+    padded = [c for c in configs if c["head"] == "hrc" and "hrc_tree" not in c]
+    assert len(padded) == 6
+    for config in padded:
+        assert set(config) == {"head", "sigma_v", "gain_w", "gain_b", "mean_init"}
+
+
+def test_selection_arm_separates_the_two_trees(tmp_path):
+    assert runner.selection_arm({"head": "hrc"}) == "hrc"
+    assert runner.selection_arm({"head": "hrc", "hrc_tree": "padded"}) == "hrc"
+    assert runner.selection_arm({"head": "hrc", "hrc_tree": "full"}) == "hrc:full"
+    # the probit head's default is the full tree, so that one keeps its name
+    assert runner.selection_arm({"head": "hrc_probit", "hrc_tree": "full"}) == "hrc_probit"
+    assert runner.selection_arm({"head": "remax_lognormal"}) == "remax_lognormal"
+
+
+def test_select_keeps_a_winner_per_tree_and_carries_the_tree_forward(tmp_path):
+    """Both trees must survive selection, with hrc_tree in the chosen config.
+
+    Grouping by head alone made the two trees compete for one slot, and the
+    config projection dropped hrc_tree, so a winning full-tree cell would have
+    been confirmed on the padded tree -- and silently, since padded is what
+    hrc_tree="auto" resolves to.
+    """
+
+    manifest = _init_manifest(tmp_path)
+    root = runner.stage_root(manifest, "init_screen", "cifar10")
+    cells = [
+        ("padded_win", None, 0.90, 0.40),
+        ("padded_lose", None, 0.89, 0.55),
+        ("full_win", "full", 0.88, 0.30),
+        ("full_lose", "full", 0.87, 0.61),
+    ]
+    for name, tree, accuracy, nll in cells:
+        run_dir = root / "hrc" / name
+        run_dir.mkdir(parents=True)
+        config = {
+            "head": "hrc", "seed": 0, "sigma_v": 0.1,
+            "gain_w": 0.3, "gain_b": 0.3, "mean_init": "zero",
+            "dataset": "cifar10", "stage": "init_screen", "epochs": 20,
+        }
+        if tree:
+            config["hrc_tree"] = tree
+        (run_dir / "config.json").write_text(json.dumps(config))
+        (run_dir / "history.json").write_text(
+            json.dumps(
+                [{"epoch": 20, "val_accuracy": accuracy, "val_nll": nll,
+                  "val_brier": 0.2, "val_ece": 0.03}]
+            )
+        )
+
+    runner.select_stage(
+        SimpleNamespace(stage="init_screen", dataset="cifar10"), manifest
+    )
+    selected = json.loads((root / "selection.json").read_text())["selected"]
+
+    assert set(selected) == {"hrc", "hrc:full"}
+    assert selected["hrc"]["run_dir"].endswith("padded_win")
+    assert selected["hrc:full"]["run_dir"].endswith("full_win")
+    assert "hrc_tree" not in selected["hrc"]["config"]
+    assert selected["hrc:full"]["config"]["hrc_tree"] == "full"
+
+    # ...and the confirm grid therefore carries the tree into training.
+    confirm = runner.init_confirm_configs(manifest, "cifar10")
+    full_arms = [c for c in confirm if c.get("hrc_tree") == "full"]
+    assert len(full_arms) == 2  # the selected arm and its random counterpart
+    assert {c["mean_init"] for c in full_arms} == {"zero", "random"}
+
+
+def test_calibrate_refuses_when_no_full_tree_run_exists(tmp_path):
+    """The padded tree cannot be gain-calibrated, and the error must say so."""
+
+    manifest = _init_manifest(tmp_path)
+    root = runner.stage_root(manifest, "init_confirm", "cifar10")
+    run_dir = root / "hrc" / "padded_only"
+    run_dir.mkdir(parents=True)
+    (run_dir / "config.json").write_text(
+        json.dumps(
+            {"head": "hrc", "seed": 0, "epochs": 200, "dataset": "cifar10",
+             "stage": "init_confirm", "mean_init": "zero"}
+        )
+    )
+    (run_dir / "history.json").write_text(json.dumps([]))
+
+    features = tmp_path / "smoke" / "features" / "cifar10"
+    generator = torch.Generator().manual_seed(5)
+    for name in ("validation", "test", "svhn"):
+        save_feature_shard(
+            features / f"{name}.pt",
+            {
+                "features": torch.randn(8, 5, generator=generator),
+                "logits": torch.randn(8, 10, generator=generator),
+                "labels": torch.arange(8) % 10,
+            },
+            {"fingerprint": name},
+        )
+
+    with pytest.raises(FileNotFoundError, match="hrc_tree=full"):
+        runner.calibrate_stage(
+            SimpleNamespace(
+                dataset="cifar10", stage="init_confirm", sharing=None,
+                method="grid", skip_corruptions=True, force=False,
+                batch_size=4, device="cpu",
+            ),
+            manifest,
+        )

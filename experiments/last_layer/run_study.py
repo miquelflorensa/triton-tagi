@@ -40,6 +40,11 @@ from triton_tagi import (  # noqa: E402
     evaluate_ood_comprehensive,
     training_required_epoch,
 )
+from triton_tagi.hsm_calibration import (  # noqa: E402
+    DEFAULT_GAIN_ORDER,
+    GAIN_SHARING,
+    hsm_class_moments,
+)
 from triton_tagi.cifar_study import (  # noqa: E402
     CANONICAL_CORRUPTIONS,
     CifarCorruption,
@@ -401,12 +406,50 @@ def tagiv_configs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+HIERARCHICAL_HEADS = {"hrc", "hrc_probit"}
+
+
+def default_hrc_tree(head: str) -> str:
+    """The tree ``hrc_tree="auto"`` resolves to for a head.
+
+    Mirrors TAGILastLayerClassifier: the probit head needs the proper K-leaf
+    tree, and the base HRC head keeps the padded one every prior screen used.
+    """
+
+    return "full" if head == "hrc_probit" else "padded"
+
+
+def hrc_tree_variants(manifest: dict[str, Any], head: str) -> list[dict[str, str]]:
+    """Return the ``hrc_tree`` overrides to cross a head with.
+
+    Only the hierarchical heads have a tree to vary. The head's own default is
+    emitted as an *empty* override rather than an explicit key, so its run hash
+    matches the cells already on disk and the driver skips them instead of
+    recomputing an identical grid; the checkpoint still records the resolved
+    tree in its own config, and a blank column in the report means "the head's
+    default", the same convention an axis that predates a run already uses.
+    """
+
+    if head not in HIERARCHICAL_HEADS:
+        return [{}]
+    default = default_hrc_tree(head)
+    variants = []
+    for tree in manifest["init_study"].get("hrc_trees", [default]):
+        variants.append({} if tree == default else {"hrc_tree": tree})
+    return variants
+
+
 def init_screen_configs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     """The mean-initialization grid: init x gain x sigma_v, per head.
 
     ``logit_tagiv`` zeroes its own latent means, so "random" and "zero" are the
     same head for it and only the distinct arms are emitted. Deduplicating here
     rather than dropping the rows later keeps the cell count honest.
+
+    ``hrc`` is crossed with both trees. The padded tree is the headline arm and
+    the one the v2 gain selections transfer from; the full tree is the only one
+    HSM gain calibration accepts, since the padded tree discards leaves that
+    hold probability mass.
     """
 
     study = manifest["init_study"]
@@ -417,6 +460,7 @@ def init_screen_configs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
             "gain_w": gain,
             "gain_b": gain,
             "mean_init": mean_init,
+            **tree,
         }
         for head, mean_init, gain, sigma_v in itertools.product(
             study["fixed_noise_heads"],
@@ -424,6 +468,7 @@ def init_screen_configs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
             study["tied_gains"],
             study["sigma_v"],
         )
+        for tree in hrc_tree_variants(manifest, head)
     ]
     configs.extend(
         {
@@ -459,6 +504,24 @@ def init_confirm_configs(manifest: dict[str, Any], dataset: str) -> list[dict[st
         if baseline not in configs:
             configs.append(baseline)
     return configs
+
+
+def selection_arm(config: dict[str, Any]) -> str:
+    """The key a config is selected under.
+
+    One winner per head is right until a head is run in two variants that are
+    not interchangeable. ``hrc`` on the padded and the full tree is such a
+    pair -- only the full tree can be gain-calibrated -- so each gets its own
+    selection instead of the two competing for one slot. A head at its default
+    tree keeps its bare name, which is what the v2 selections on disk and the
+    v2 report generator already expect.
+    """
+
+    head = config["head"]
+    tree = config.get("hrc_tree")
+    if not tree or tree == default_hrc_tree(head):
+        return head
+    return f"{head}:{tree}"
 
 
 def load_selection(manifest: dict[str, Any], dataset: str, stage: str) -> dict[str, Any]:
@@ -745,6 +808,7 @@ def select_stage(args, manifest: dict[str, Any]) -> None:
                                 "gain_w",
                                 "gain_b",
                                 "mean_init",
+                                "hrc_tree",
                                 "v2bar_init",
                                 "v2bar_weight_var",
                                 "v2bar_bias_var",
@@ -758,9 +822,11 @@ def select_stage(args, manifest: dict[str, Any]) -> None:
                 )
     if not candidates:
         raise FileNotFoundError(f"no completed candidates under {root}")
+    for candidate in candidates:
+        candidate["arm"] = selection_arm(candidate["config"])
     selected = {}
-    for head in sorted({candidate["head"] for candidate in candidates}):
-        group = [candidate for candidate in candidates if candidate["head"] == head]
+    for arm in sorted({candidate["arm"] for candidate in candidates}):
+        group = [candidate for candidate in candidates if candidate["arm"] == arm]
         best_accuracy = max(item["record"]["val_accuracy"] for item in group)
         eligible = [
             item
@@ -775,7 +841,7 @@ def select_stage(args, manifest: dict[str, Any]) -> None:
                 item["record"]["val_ece"],
             ),
         )
-        selected[head] = winner
+        selected[arm] = winner
     output = {
         "dataset": args.dataset,
         "stage": args.stage,
@@ -934,6 +1000,164 @@ def evaluate_study(args, manifest: dict[str, Any]) -> None:
             print(f"evaluated {destination}")
 
 
+def calibrated_predict_batches(
+    classifier,
+    features: torch.Tensor,
+    batch_size: int,
+    posterior,
+    order: int = DEFAULT_GAIN_ORDER,
+):
+    """Class probabilities and epistemic dispersion under a fitted gain belief.
+
+    The epistemic score is reduced the same way :func:`predict_batches` reduces
+    the uncalibrated head's, so the native-epistemic OOD column compares like
+    with like across the calibrated and uncalibrated rows.
+    """
+
+    probability_parts, epistemic_parts = [], []
+    for start in range(0, features.shape[0], batch_size):
+        chunk = features[start : start + batch_size]
+        mean, variance = classifier.hrc_node_moments(chunk, batch_size=batch_size)
+        moments = hsm_class_moments(
+            mean, variance, classifier.hrc, posterior, order=order
+        )
+        probability_parts.append(moments.mean.float().cpu())
+        epistemic_parts.append(
+            moments.variance.reshape(moments.variance.shape[0], -1)
+            .mean(1)
+            .float()
+            .cpu()
+        )
+    return torch.cat(probability_parts), torch.cat(epistemic_parts)
+
+
+def calibrate_stage(args, manifest: dict[str, Any]) -> None:
+    """Fit the HSM log-gain on validation, then evaluate the calibrated head.
+
+    This is the hierarchical probit calibration of Goulet, Nguyen and
+    Florensa-Montilla: a Gaussian belief over each group's positive-branch log
+    gain, fitted on a split disjoint from training with the network frozen, and
+    integrated over at prediction rather than plugged in. ``prior_mean = 0`` is
+    the uncalibrated head, so the ``evaluate`` rows are the baseline these are
+    read against.
+
+    Only the full tree is eligible. The padded tree discards leaves that hold
+    probability mass, so ``gain_groups`` rejects it outright rather than fitting
+    a gain against a partition function that is not one.
+    """
+
+    dataset = args.dataset
+    stage = args.stage
+    features = feature_root(manifest, dataset)
+    validation = load_feature_shard(features / "validation.pt")
+    clean = load_feature_shard(features / "test.pt")
+    svhn = load_feature_shard(features / "svhn.pt")
+    output_root = artifact_root(manifest) / "evaluations" / dataset / f"{stage}_calibrated"
+    sharings = args.sharing or list(GAIN_SHARING)
+
+    run_root = stage_root(manifest, stage, dataset)
+    checkpoint_epochs = confirm_checkpoints(manifest, stage)
+    eligible = 0
+    for run_config_path in sorted(run_root.glob("*/*/config.json")):
+        run_dir = run_config_path.parent
+        config = json.loads(run_config_path.read_text())
+        head = config["head"]
+        tree = config.get("hrc_tree") or default_hrc_tree(head)
+        if head not in HIERARCHICAL_HEADS or tree != "full":
+            continue
+        eligible += 1
+        history = json.loads((run_dir / "history.json").read_text())
+        selectable = [row for row in history if int(row["epoch"]) in checkpoint_epochs]
+        if not selectable:
+            continue
+        best_accuracy = max(row["val_accuracy"] for row in selectable)
+        best = min(
+            (row for row in selectable if row["val_accuracy"] >= best_accuracy - 0.01),
+            key=lambda row: (row["val_nll"], row["val_brier"], row["val_ece"]),
+        )
+        for epoch in sorted({int(best["epoch"]), int(config["epochs"])}):
+            checkpoint = run_dir / "checkpoints" / f"epoch_{epoch:04d}.pt"
+            if not checkpoint.exists():
+                continue
+            for sharing in sharings:
+                destination = (
+                    output_root
+                    / run_dir.relative_to(run_root)
+                    / f"epoch_{epoch:04d}_{sharing}.json"
+                )
+                if destination.exists() and not args.force:
+                    print(f"skip calibrated {destination}")
+                    continue
+                classifier, metadata = TAGILastLayerClassifier.load(
+                    checkpoint, device=args.device
+                )
+                started = time.time()
+                posterior = classifier.calibrate_hsm_log_gain(
+                    validation["features"],
+                    validation["labels"],
+                    sharing=sharing,
+                    method=args.method,
+                    batch_size=args.batch_size,
+                )
+                probability_id, epistemic_id = calibrated_predict_batches(
+                    classifier, clean["features"], args.batch_size, posterior
+                )
+                probability_svhn, epistemic_svhn = calibrated_predict_batches(
+                    classifier, svhn["features"], args.batch_size, posterior
+                )
+                result = {
+                    # The calibration arm rides in the config so it reaches
+                    # report.csv as its own column and never averages into the
+                    # uncalibrated row.
+                    "config": {**config, "calibration": sharing},
+                    "checkpoint": str(checkpoint),
+                    "metadata": metadata,
+                    "selection_epoch": int(best["epoch"]),
+                    "calibration": {
+                        "sharing": sharing,
+                        "method": args.method,
+                        "n_groups": int(posterior.groups.n_groups),
+                        "fit_rows": int(validation["features"].shape[0]),
+                        "log_gain_mean": posterior.mean.flatten().tolist(),
+                        "log_gain_variance": posterior.variance.flatten().tolist(),
+                        "fit_and_evaluate_s": time.time() - started,
+                    },
+                    "clean_and_svhn": evaluate_probabilities(
+                        probability_id,
+                        clean["labels"],
+                        probability_svhn,
+                        epistemic_id,
+                        epistemic_svhn,
+                    ),
+                    "corruptions": {},
+                }
+                if not args.skip_corruptions:
+                    for shard_path in sorted((features / "corruptions").glob("*.pt")):
+                        shard = load_feature_shard(shard_path)
+                        probabilities, epistemic = calibrated_predict_batches(
+                            classifier, shard["features"], args.batch_size, posterior
+                        )
+                        result["corruptions"][shard_path.stem] = evaluate_probabilities(
+                            probability_id,
+                            clean["labels"],
+                            probabilities,
+                            epistemic_id,
+                            epistemic,
+                            labels_ood=shard["labels"],
+                        )
+                atomic_json(destination, result)
+                print(
+                    f"calibrated {destination} "
+                    f"({sharing}, {posterior.groups.n_groups} groups, "
+                    f"{result['calibration']['fit_and_evaluate_s']:.1f}s)"
+                )
+    if not eligible:
+        raise FileNotFoundError(
+            f"no full-tree hierarchical runs under {run_root}; HSM gain "
+            "calibration needs hrc_tree=full, the padded tree is rejected"
+        )
+
+
 def flatten_metrics(prefix: str, value: Any, row: dict[str, Any]) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -947,7 +1171,15 @@ def _t_critical_95(sample_count: int) -> float:
     return table.get(sample_count, 1.96 if sample_count > 30 else 2.262)
 
 
-CONFIG_IDENTITY_FIELDS = ("stage", "mean_init", "gain_w", "gain_b", "sigma_v")
+CONFIG_IDENTITY_FIELDS = (
+    "stage",
+    "mean_init",
+    "hrc_tree",
+    "gain_w",
+    "gain_b",
+    "sigma_v",
+    "calibration",
+)
 
 
 def config_identity(config: dict[str, Any] | None) -> dict[str, Any]:
@@ -1150,6 +1382,23 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     evaluate.add_argument("--batch-size", type=int, default=512)
 
+    calibrate = subparsers.add_parser("calibrate")
+    calibrate.add_argument("--dataset", choices=("cifar10", "cifar100"), required=True)
+    calibrate.add_argument(
+        "--stage", choices=tuple(CONFIRM_STAGES), default="init_confirm"
+    )
+    calibrate.add_argument(
+        "--sharing", action="append", choices=tuple(GAIN_SHARING), default=None,
+        help="repeatable; defaults to all of global, level and node",
+    )
+    calibrate.add_argument("--method", choices=("grid", "laplace"), default="grid")
+    calibrate.add_argument("--skip-corruptions", action="store_true")
+    calibrate.add_argument("--force", action="store_true")
+    calibrate.add_argument("--batch-size", type=int, default=512)
+    calibrate.add_argument(
+        "--device", default="cuda" if torch.cuda.is_available() else "cpu"
+    )
+
     subparsers.add_parser("report")
     return parser
 
@@ -1168,6 +1417,8 @@ def main() -> None:
         select_stage(args, manifest)
     elif args.command == "evaluate":
         evaluate_study(args, manifest)
+    elif args.command == "calibrate":
+        calibrate_stage(args, manifest)
     elif args.command == "report":
         report_study(args, manifest)
 
