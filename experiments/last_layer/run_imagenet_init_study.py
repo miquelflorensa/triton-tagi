@@ -156,14 +156,24 @@ def screen_configs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def confirm_configs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    """The selected arm per head, plus its ``random`` counterpart for the delta."""
+    """The selected arm per head, plus its ``random`` counterpart for the delta.
+
+    Heads that zero their own latent means -- ``logit_tagiv`` -- have no
+    distinct ``random`` arm, for the same reason ``screen_configs`` emits only
+    two arms for them. Pairing one anyway would spend a full confirm cell
+    recomputing the selected arm under a different run hash and would put a
+    delta of exactly zero in the table as though it had been measured.
+    """
 
     selection = json.loads((stage_root(manifest, "screen") / "selection.json").read_text())
+    zero_mean_heads = set(manifest["logit_heads"])
     configs: list[dict[str, Any]] = []
     for choice in selection["selected"].values():
         base = dict(choice["config"])
         if base not in configs:
             configs.append(base)
+        if base["head"] in zero_mean_heads:
+            continue
         baseline = {**base, "mean_init": "random"}
         if baseline not in configs:
             configs.append(baseline)
