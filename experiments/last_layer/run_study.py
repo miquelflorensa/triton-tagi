@@ -781,6 +781,19 @@ def run_stage(args, manifest: dict[str, Any]) -> None:
 
 
 def select_stage(args, manifest: dict[str, Any]) -> None:
+    """Pick, per arm, the lowest validation NLL within 1pp of the best accuracy.
+
+    Epoch 0 is the prior, before any data, and is never selectable -- the same
+    rule ``run_imagenet_init_study.py`` applies. It matters here because the
+    ``backbone`` arm's epoch 0 is not an untrained head at all: it is the
+    backbone's own trained ``fc``, so it scores like the softmax baseline it
+    is a copy of (CIFAR-10 ``remax_lognormal``: 0.9539 / 0.1913 at epoch 0
+    against ``pytorch_softmax`` at 0.9500 / 0.1941). Letting it win would make
+    the study report its own baseline as a TAGI result, and would confirm an
+    untrained classifier at 200 epochs. The warm start is reported on its own,
+    as the reference it is, rather than as a selected cell.
+    """
+
     root = stage_root(manifest, args.stage, args.dataset)
     candidates = []
     if args.stage.startswith("init_"):
@@ -796,7 +809,7 @@ def select_stage(args, manifest: dict[str, Any]) -> None:
         config = json.loads((history_path.parent / "config.json").read_text())
         records = json.loads(history_path.read_text())
         for record in records:
-            if int(record["epoch"]) in checkpoint_epochs:
+            if int(record["epoch"]) > 0 and int(record["epoch"]) in checkpoint_epochs:
                 candidates.append(
                     {
                         "head": config["head"],

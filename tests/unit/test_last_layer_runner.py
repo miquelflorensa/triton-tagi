@@ -518,3 +518,44 @@ def test_calibrate_refuses_when_no_full_tree_run_exists(tmp_path):
             ),
             manifest,
         )
+
+
+def test_select_never_picks_the_untrained_prior(tmp_path):
+    """Epoch 0 is the prior and must not win, however good it scores.
+
+    For the backbone arm epoch 0 is the backbone's own trained fc, so it
+    scores like the softmax baseline; selecting it would report the study's
+    own baseline as a TAGI result and would confirm an untrained classifier
+    at 200 epochs.
+    """
+
+    manifest = _init_manifest(tmp_path)
+    root = runner.stage_root(manifest, "init_screen", "cifar10")
+    run_dir = root / "remax_lognormal" / "warm_start"
+    run_dir.mkdir(parents=True)
+    (run_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "head": "remax_lognormal", "seed": 0, "sigma_v": 0.1,
+                "gain_w": 1.0, "gain_b": 1.0, "mean_init": "backbone",
+                "dataset": "cifar10", "stage": "init_screen", "epochs": 20,
+            }
+        )
+    )
+    (run_dir / "history.json").write_text(
+        json.dumps(
+            [
+                # the warm start: the best NLL in the run, and untrained
+                {"epoch": 0, "val_accuracy": 0.9539, "val_nll": 0.1913,
+                 "val_brier": 0.07, "val_ece": 0.0476},
+                {"epoch": 20, "val_accuracy": 0.9512, "val_nll": 0.3943,
+                 "val_brier": 0.08, "val_ece": 0.0346},
+            ]
+        )
+    )
+
+    runner.select_stage(
+        SimpleNamespace(stage="init_screen", dataset="cifar10"), manifest
+    )
+    selected = json.loads((root / "selection.json").read_text())["selected"]
+    assert selected["remax_lognormal"]["record"]["epoch"] == 20

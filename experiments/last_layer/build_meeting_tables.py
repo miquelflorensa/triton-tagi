@@ -67,11 +67,19 @@ def screen_cells(manifest: dict[str, Any], stage: str = "init_screen") -> list[d
         final = [row for row in records if int(row["epoch"]) == int(config["epochs"])]
         if not final:
             continue
+        zero = [row for row in records if int(row["epoch"]) == 0]
+        # Epoch 0 is the prior and is not a trained model; the best trained
+        # checkpoint is what "this cell can do" and is frequently epoch 1.
+        trained = [row for row in records if int(row["epoch"]) > 0]
         cells.append(
             {
                 "config": config,
                 "arm": arm_name(config["head"], config.get("hrc_tree")),
                 "record": final[-1],
+                "epoch0": zero[-1] if zero else None,
+                "best_trained": (
+                    min(trained, key=lambda row: row["val_nll"]) if trained else None
+                ),
             }
         )
     return cells
@@ -181,6 +189,72 @@ def table_axis_sensitivity(cells: list[dict[str, Any]], axis: str, values: list)
                     continue
                 blocks.append(f"| `{arm}` | {init} | " + " | ".join(row) + " |")
     return "\n".join(blocks) + "\n"
+
+
+def table_warm_start(cells: list[dict[str, Any]], rows: list[dict[str, Any]]) -> str:
+    """The backbone arm before any training, reported as the reference it is.
+
+    Epoch 0 of the ``backbone`` arm is the backbone's own trained ``fc`` read
+    through the head's link, so it is not an untrained model -- it scores like
+    the softmax baseline it copies. It is excluded from selection (a selected
+    cell must have seen data) and reported here instead, because "the warm
+    start beats every trained cell" is a finding about the heads, not about
+    initialization, and the deck must not present it as the latter.
+
+    It needs no seeds: at epoch 0 nothing has been trained, and the prior
+    variances are a deterministic function of gain, so the row is exact.
+    """
+
+    if not cells:
+        return pending("The warm-start reference", "no completed init_screen cells")
+    baseline = {
+        row["dataset"]: row for row in rows if row.get("head") == "pytorch_softmax"
+    }
+    lines = [
+        "| dataset | head | epoch 0 top-1 | epoch 0 NLL | epoch 0 ECE | best trained NLL | trained at epoch |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for dataset in DATASET_ORDER:
+        for arm in HEAD_ORDER:
+            warm = [
+                c for c in cells
+                if c["config"]["dataset"] == dataset
+                and c["arm"] == arm
+                and c["config"].get("mean_init") == "backbone"
+            ]
+            if not warm:
+                continue
+            # Epoch 0 varies across the grid only through the prior variance,
+            # so report the best of them and the best trained cell beside it.
+            warmest = min(
+                (c for c in warm if c.get("epoch0")),
+                key=lambda c: c["epoch0"]["val_nll"],
+                default=None,
+            )
+            if warmest is None:
+                continue
+            record = warmest["epoch0"]
+            trained = min(
+                (c for c in warm if c.get("best_trained")),
+                key=lambda c: c["best_trained"]["val_nll"],
+                default=None,
+            )
+            if trained is None:
+                continue
+            lines.append(
+                f"| {dataset} | `{arm}` | {number(record['val_accuracy'])} | "
+                f"{number(record['val_nll'])} | {number(record['val_ece'])} | "
+                f"{number(trained['best_trained']['val_nll'])} | "
+                f"{int(trained['best_trained']['epoch'])} |"
+            )
+    for dataset, row in sorted(baseline.items()):
+        lines.append(
+            f"| {dataset} | `pytorch_softmax` (reference) | "
+            f"{number(row.get('clean_svhn_classification_accuracy'))} | "
+            f"{number(row.get('clean_svhn_classification_nll'))} | "
+            f"{number(row.get('clean_svhn_classification_ece'))} | — | — |"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _confirm_rows(rows: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
@@ -343,6 +417,9 @@ def build(manifest: dict[str, Any]) -> str:
         "### At 20 epochs (screen), each arm at its own best gain and sigma_v",
         "",
         table_screen_init_delta(cells),
+        "### The warm start, before any training",
+        "",
+        table_warm_start(cells, rows),
         "## Table 3 — gain sensitivity",
         "",
         "Read this as *which prior width each arm wants*, not which arm wins: "
