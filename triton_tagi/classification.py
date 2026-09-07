@@ -12,13 +12,6 @@ from typing import Any
 import torch
 from torch import Tensor
 
-from .agci import agci_predictive_probs
-from .core_tail import (
-    A_STAR,
-    DEFAULT_NUM_ITERATIONS,
-    core_tail_predictive_probs,
-)
-from .gumbel_agci import gumbel_agci_predictive_probs, logit_predictive_probs
 from .hrc_probit import (
     DEFAULT_LOG_TAU,
     fit_hrc_log_tau,
@@ -52,7 +45,6 @@ from .logit_tagiv import (
     split_logit_tagiv_outputs,
     standard_normal_base_samples,
 )
-from .multinomial_probit import multinomial_probit_adf_predictive_probs
 from .network import Sequential
 from .update.observation import categorical_predictive_probs
 
@@ -65,8 +57,6 @@ _FIXED_NOISE_HEADS = {
 }
 _UNIT_PROBIT_HEADS = {"hrc_probit"}
 _HRC_HEADS = {"hrc", "hrc_probit", "hrc_tagiv"}
-_ADF_PROBIT_HEADS = {"multinomial_probit"}
-_AGCI_HEADS = {"agci", "agci_remax", "gumbel_agci", "logit_site", "ct_agci"}
 _TAGIV_HEADS = {"categorical_tagiv", "hrc_tagiv"}
 _LOGIT_TARGET_HEADS = {"logit_tagiv"}
 
@@ -111,8 +101,7 @@ class TAGILastLayerClassifier:
     """A trainable TAGI linear classification head over fixed representations.
 
     Supported heads are probit_ovr, remax_lognormal, remax_laplace_diag, hrc,
-    hrc_probit, multinomial_probit, agci, agci_remax, gumbel_agci, logit_site,
-    ct_agci, categorical_tagiv, hrc_tagiv, and logit_tagiv. The legacy
+    hrc_probit, categorical_tagiv, hrc_tagiv, and logit_tagiv. The legacy
     head="remax" spelling remains supported and is resolved from
     remax_approximation.
 
@@ -145,16 +134,6 @@ class TAGILastLayerClassifier:
         feature_scale: float = 1.0,
         sigma_v: float | None = None,
         probit_tau2: float = 1.0,
-        agci_tau: float = 1.0,
-        agci_num_quad: int = 48,
-        agci_class_chunk_size: int | None = None,
-        agci_update: str = "observed_event",
-        gumbel_beta: float = 1.0,
-        gumbel_num_samples: int = 32,
-        gumbel_seed: int = 0,
-        core_tail_beta: float = 1.0,
-        core_tail_a_star: float = A_STAR,
-        core_tail_iterations: int = DEFAULT_NUM_ITERATIONS,
         remax_approximation: str = "lognormal",
         remax_jacobian: str = "diag",
         remax_num_quad: int = 48,
@@ -193,8 +172,6 @@ class TAGILastLayerClassifier:
         valid = (
             _FIXED_NOISE_HEADS
             | _UNIT_PROBIT_HEADS
-            | _ADF_PROBIT_HEADS
-            | _AGCI_HEADS
             | _TAGIV_HEADS
             | _LOGIT_TARGET_HEADS
         )
@@ -208,10 +185,6 @@ class TAGILastLayerClassifier:
             )
         if head in _TAGIV_HEADS | _LOGIT_TARGET_HEADS and sigma_v is not None:
             raise ValueError("TAGI-V heads learn observation variance and do not accept sigma_v")
-        if head in _ADF_PROBIT_HEADS and sigma_v is not None:
-            raise ValueError("multinomial_probit uses probit_tau2 and does not accept sigma_v")
-        if head in _AGCI_HEADS and sigma_v is not None:
-            raise ValueError("agci uses fixed agci_tau and does not accept sigma_v")
         if sigma_v is not None and sigma_v <= 0.0:
             raise ValueError("sigma_v must be positive")
         if probit_tau2 < 0.0 or not math.isfinite(probit_tau2):
@@ -224,24 +197,6 @@ class TAGILastLayerClassifier:
             hrc_tree = "full" if head == "hrc_probit" else "padded"
         if hrc_log_tau is not None and not math.isfinite(hrc_log_tau):
             raise ValueError("hrc_log_tau must be finite")
-        if agci_tau <= 0.0 or not math.isfinite(agci_tau):
-            raise ValueError("agci_tau must be finite and positive")
-        if agci_num_quad < 8:
-            raise ValueError("agci_num_quad must be at least 8")
-        if agci_class_chunk_size is not None and agci_class_chunk_size < 1:
-            raise ValueError("agci_class_chunk_size must be positive")
-        if agci_update != "observed_event":
-            raise ValueError("agci_update must be 'observed_event'")
-        if gumbel_beta <= 0.0 or not math.isfinite(gumbel_beta):
-            raise ValueError("gumbel_beta must be finite and positive")
-        if gumbel_num_samples < 2 or gumbel_num_samples % 2 != 0:
-            raise ValueError("gumbel_num_samples must be an even integer of at least two")
-        if core_tail_beta <= 0.0 or not math.isfinite(core_tail_beta):
-            raise ValueError("core_tail_beta must be finite and positive")
-        if not math.isfinite(core_tail_a_star) or not 0.0 <= core_tail_a_star < 0.5:
-            raise ValueError("core_tail_a_star must lie in [0, 0.5)")
-        if core_tail_iterations < 1:
-            raise ValueError("core_tail_iterations must be positive")
         if logit_variance_floor < 0.0 or not math.isfinite(logit_variance_floor):
             raise ValueError("logit_variance_floor must be finite and nonnegative")
         if logit_aleatoric_init <= logit_variance_floor:
@@ -307,19 +262,6 @@ class TAGILastLayerClassifier:
         self.feature_scale = float(feature_scale)
         self.sigma_v = sigma_v
         self.probit_tau2 = float(probit_tau2)
-        self.agci_tau = float(agci_tau)
-        self.agci_num_quad = int(agci_num_quad)
-        self.agci_class_chunk_size = agci_class_chunk_size
-        self.agci_update = agci_update
-        self.gumbel_beta = float(gumbel_beta)
-        self.gumbel_num_samples = int(gumbel_num_samples)
-        self.gumbel_seed = int(gumbel_seed)
-        self.core_tail_beta = float(core_tail_beta)
-        self.core_tail_a_star = float(core_tail_a_star)
-        self.core_tail_iterations = int(core_tail_iterations)
-        # Every training step draws its own reproducible stream so that a
-        # repeated pass over the same batch does not reuse identical draws.
-        self._gumbel_step = 0
         self.remax_approximation = remax_approximation
         self.remax_jacobian = remax_jacobian
         self.remax_num_quad = int(remax_num_quad)
@@ -374,14 +316,6 @@ class TAGILastLayerClassifier:
             gain_w=gain_w,
             gain_b=gain_b,
         )
-        if head in _AGCI_HEADS:
-            # A fresh Event-AGCI last layer represents a class-symmetric
-            # Gaussian prior, not a prior centred on one random classifier.
-            # Linear's He variances already give gain^2 / input_dim.
-            with torch.no_grad():
-                self.linear.mw.zero_()
-                assert self.linear.mb is not None
-                self.linear.mb.zero_()
         layers: list = [self.linear]
         if head.startswith("remax_"):
             layers.append(
@@ -398,18 +332,6 @@ class TAGILastLayerClassifier:
             layers.append(EvenExp(base_dim))
             self._initialize_logit_tagiv_prior()
         self.net = Sequential(layers, device=self.device)
-        # AGCI must condition the Gaussian utilities before any simplex map.
-        # Keep ReMax outside ``self.net`` so it is prediction-only for the
-        # hybrid head and cannot enter the AGCI backward pass.
-        self.predictive_remax: Remax | None = (
-            Remax(
-                approximation=remax_approximation,
-                jacobian=remax_jacobian,
-                num_quad=remax_num_quad,
-            )
-            if head == "agci_remax"
-            else None
-        )
 
     def _initialize_tagiv_prior(self) -> None:
         odd = slice(1, None, 2)
@@ -572,53 +494,6 @@ class TAGILastLayerClassifier:
             self.net.step_hrc_probit(x, labels, self.hrc)
             return
 
-        if self.head == "multinomial_probit":
-            if sigma_v is not None:
-                raise ValueError("multinomial_probit uses probit_tau2 and does not accept sigma_v")
-            self.net.step_multinomial_probit_adf(x, labels, self.probit_tau2)
-            return
-
-        if self.head == "ct_agci":
-            if sigma_v is not None:
-                raise ValueError("ct_agci uses fixed core_tail_beta and does not accept sigma_v")
-            self.net.step_core_tail(
-                x,
-                labels,
-                beta=self.core_tail_beta,
-                a_star=self.core_tail_a_star,
-                num_iterations=self.core_tail_iterations,
-            )
-            return
-
-        if self.head == "logit_site":
-            if sigma_v is not None:
-                raise ValueError("logit_site uses fixed gumbel_beta and does not accept sigma_v")
-            self.net.step_logit_site(x, labels, beta=self.gumbel_beta)
-            return
-
-        if self.head == "gumbel_agci":
-            if sigma_v is not None:
-                raise ValueError("gumbel_agci uses fixed gumbel_beta and does not accept sigma_v")
-            self.net.step_gumbel_agci(
-                x,
-                labels,
-                beta=self.gumbel_beta,
-                num_samples=self.gumbel_num_samples,
-                seed=self.gumbel_seed + self._gumbel_step,
-            )
-            self._gumbel_step += 1
-            return
-
-        if self.head in _AGCI_HEADS:
-            if sigma_v is not None:
-                raise ValueError("agci uses fixed agci_tau and does not accept sigma_v")
-            self.net.step_agci(
-                x,
-                labels,
-                self.agci_tau,
-                self.agci_num_quad,
-            )
-            return
 
         resolved_sigma = self._resolve_sigma_v(sigma_v)
         if self.head == "hrc":
@@ -672,71 +547,6 @@ class TAGILastLayerClassifier:
             )
             diagnostics["class_log_probabilities"] = log_probabilities
             probabilities = log_probabilities.exp().to(mean.dtype)
-        elif self.head == "multinomial_probit":
-            if sigma_v is not None:
-                raise ValueError("multinomial_probit uses probit_tau2 and does not accept sigma_v")
-            probabilities = multinomial_probit_adf_predictive_probs(
-                mean, variance, probit_tau2=self.probit_tau2
-            )
-        elif self.head == "agci_remax":
-            if sigma_v is not None:
-                raise ValueError("agci uses fixed agci_tau and does not accept sigma_v")
-            assert self.predictive_remax is not None
-            diagnostics["utility_mean"] = mean
-            diagnostics["utility_variance"] = variance
-            # The AGCI argmax likelihood identifies utility contrasts, not a
-            # shared location. Fix that gauge before applying ReMax, whose
-            # zero-threshold would otherwise make predictions depend on an
-            # arbitrary common utility offset.
-            centered_mean = mean - mean.mean(dim=-1, keepdim=True)
-            diagnostics["centered_utility_mean"] = centered_mean
-            mean, variance = self.predictive_remax.forward(centered_mean, variance)
-            probabilities = mean
-            epistemic = variance
-        elif self.head == "ct_agci":
-            if sigma_v is not None:
-                raise ValueError("ct_agci uses fixed core_tail_beta and does not accept sigma_v")
-            diagnostics["utility_mean"] = mean
-            diagnostics["utility_variance"] = variance
-            # The Core-Tail link is applied to the prior means alone, the
-            # same convention logit_site uses, so the two differ only in
-            # the link.
-            probabilities = core_tail_predictive_probs(
-                mean,
-                beta=self.core_tail_beta,
-                a_star=self.core_tail_a_star,
-                num_iterations=self.core_tail_iterations,
-            )
-        elif self.head == "logit_site":
-            if sigma_v is not None:
-                raise ValueError("logit_site uses fixed gumbel_beta and does not accept sigma_v")
-            diagnostics["utility_mean"] = mean
-            diagnostics["utility_variance"] = variance
-            # Deliberately ignores posterior logit variance, isolating the
-            # likelihood tail from posterior-predictive integration.
-            probabilities = logit_predictive_probs(mean, beta=self.gumbel_beta)
-        elif self.head == "gumbel_agci":
-            if sigma_v is not None:
-                raise ValueError("gumbel_agci uses fixed gumbel_beta and does not accept sigma_v")
-            diagnostics["utility_mean"] = mean
-            diagnostics["utility_variance"] = variance
-            probabilities = gumbel_agci_predictive_probs(
-                mean,
-                variance,
-                beta=self.gumbel_beta,
-                num_samples=self.gumbel_num_samples,
-                seed=self.gumbel_seed,
-            )
-        elif self.head == "agci":
-            if sigma_v is not None:
-                raise ValueError("agci uses fixed agci_tau and does not accept sigma_v")
-            probabilities = agci_predictive_probs(
-                mean,
-                variance,
-                tau=self.agci_tau,
-                num_quad=self.agci_num_quad,
-                class_chunk_size=self.agci_class_chunk_size,
-            )
         elif self.head == "categorical_tagiv":
             probabilities = categorical_predictive_probs(mean, variance, self.num_classes)
             epistemic = variance[..., 0::2]
@@ -836,10 +646,6 @@ class TAGILastLayerClassifier:
             )
         if self.head in _TAGIV_HEADS | _LOGIT_TARGET_HEADS and sigma_v is not None:
             raise ValueError("TAGI-V heads do not accept sigma_v")
-        if self.head in _ADF_PROBIT_HEADS and sigma_v is not None:
-            raise ValueError("multinomial_probit uses probit_tau2 and does not accept sigma_v")
-        if self.head in _AGCI_HEADS and sigma_v is not None:
-            raise ValueError("agci uses fixed agci_tau and does not accept sigma_v")
         if self.head in _FIXED_NOISE_HEADS:
             self._resolve_sigma_v(sigma_v)
 
@@ -1362,16 +1168,6 @@ class TAGILastLayerClassifier:
             "hrc_tree": self.hrc_tree,
             "hrc_prior_offsets": self.hrc_prior_offsets,
             "hrc_log_tau": self.hrc_log_tau,
-            "agci_tau": self.agci_tau,
-            "agci_num_quad": self.agci_num_quad,
-            "gumbel_beta": self.gumbel_beta,
-            "gumbel_num_samples": self.gumbel_num_samples,
-            "gumbel_seed": self.gumbel_seed,
-            "core_tail_beta": self.core_tail_beta,
-            "core_tail_a_star": self.core_tail_a_star,
-            "core_tail_iterations": self.core_tail_iterations,
-            "agci_class_chunk_size": self.agci_class_chunk_size,
-            "agci_update": self.agci_update,
             "remax_approximation": self.remax_approximation,
             "remax_jacobian": self.remax_jacobian,
             "remax_num_quad": self.remax_num_quad,

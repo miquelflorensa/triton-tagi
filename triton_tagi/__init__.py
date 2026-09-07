@@ -29,36 +29,6 @@ import torch
 
 torch.backends.cuda.matmul.allow_tf32 = False
 
-from .agci import (
-    agci_categorical_moments,
-    agci_categorical_posterior,
-    agci_categorical_posterior_diagonal,
-    agci_event,
-    agci_event_diagonal,
-    agci_predictive_probs,
-    agci_weight_gain_from_kappa,
-    binary_probit_agci_event,
-    binary_probit_agci_posterior,
-    binary_probit_agci_predictive_probs,
-    compute_agci_innovation,
-)
-from .core_tail import (
-    A_STAR,
-    compute_core_tail_site_innovation,
-    core_tail_jacobian,
-    core_tail_log_probabilities,
-    core_tail_predictive_probs,
-    core_tail_probabilities,
-    core_tail_score_and_curvature,
-    core_tail_stationarity_residual,
-)
-from .gumbel_agci import (
-    compute_gumbel_agci_innovation,
-    compute_logit_site_innovation,
-    gumbel_agci_log_evidence_derivatives,
-    gumbel_agci_predictive_probs,
-    logit_predictive_probs,
-)
 from .base import Layer, LearnableLayer
 from .classification import (
     ClassificationPrediction,
@@ -190,20 +160,9 @@ from .metrics import (
     selective_classification_metrics,
     training_required_epoch,
 )
-from .multinomial_probit import (
-    compute_multinomial_probit_adf_innovation,
-    multinomial_probit_adf_event,
-    multinomial_probit_adf_predictive_probs,
-)
 from .feature_support import (
     BayesianFeatureSupportGate,
     FeatureSupportPrediction,
-)
-from .full_covariance_adf import (
-    FullCovarianceADFClassifier,
-    FullCovarianceADFPrediction,
-    contrast_covariance_logdet,
-    multinomial_probit_epistemic_mutual_information,
 )
 from .network import Sequential
 from .param_init import (
@@ -325,27 +284,6 @@ __all__ = [
     "evaluate_ood_comprehensive",
     "training_required_epoch",
     "epistemic_convergence",
-    "agci_event",
-    "agci_event_diagonal",
-    "agci_categorical_moments",
-    "agci_categorical_posterior",
-    "agci_categorical_posterior_diagonal",
-    "agci_predictive_probs",
-    "agci_weight_gain_from_kappa",
-    "binary_probit_agci_event",
-    "binary_probit_agci_posterior",
-    "binary_probit_agci_predictive_probs",
-    "compute_agci_innovation",
-    "A_STAR",
-    "compute_core_tail_site_innovation",
-    "core_tail_jacobian",
-    "core_tail_log_probabilities",
-    "core_tail_predictive_probs",
-    "core_tail_probabilities",
-    "core_tail_score_and_curvature",
-    "core_tail_stationarity_residual",
-    "compute_gumbel_agci_innovation",
-    "compute_logit_site_innovation",
     "LOGIT_VARIANCE_FLOOR",
     "LogitCalibration",
     "LogitUncertainty",
@@ -370,16 +308,6 @@ __all__ = [
     "prepare_logit_targets",
     "split_logit_tagiv_outputs",
     "standard_normal_base_samples",
-    "logit_predictive_probs",
-    "gumbel_agci_log_evidence_derivatives",
-    "gumbel_agci_predictive_probs",
-    "multinomial_probit_adf_event",
-    "multinomial_probit_adf_predictive_probs",
-    "compute_multinomial_probit_adf_innovation",
     "BayesianFeatureSupportGate",
     "FeatureSupportPrediction",
-    "FullCovarianceADFClassifier",
-    "FullCovarianceADFPrediction",
-    "contrast_covariance_logdet",
-    "multinomial_probit_epistemic_mutual_information",
 ]

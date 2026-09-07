@@ -30,17 +30,7 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
-from .agci import compute_agci_innovation
 from .base import Layer, LearnableLayer
-from .core_tail import (
-    A_STAR,
-    DEFAULT_NUM_ITERATIONS,
-    compute_core_tail_site_innovation,
-)
-from .gumbel_agci import (
-    compute_gumbel_agci_innovation,
-    compute_logit_site_innovation,
-)
 from .layers.multihead_attention import MultiheadAttentionV2
 from .layers.resblock import ResBlock
 from .logit_tagiv import (
@@ -49,7 +39,6 @@ from .logit_tagiv import (
     compute_logit_replicate_innovation,
     compute_logit_tagiv_innovation,
 )
-from .multinomial_probit import compute_multinomial_probit_adf_innovation
 from .update.observation import (
     compute_categorical_innovation,
     compute_hrc_tagiv_innovation,
@@ -452,152 +441,6 @@ class Sequential:
         for layer in reversed(self.layers):
             delta_mu, delta_var = layer.backward(delta_mu, delta_var)
         cap_factor = get_cap_factor(batch_size)
-        for layer in self.layers:
-            if isinstance(layer, LearnableLayer):
-                layer.update(cap_factor)
-        return y_pred_mu, y_pred_var
-
-    def step_multinomial_probit_adf(
-        self,
-        x_batch: Tensor,
-        labels: Tensor,
-        probit_tau2: float = 1.0,
-    ) -> tuple[Tensor, Tensor]:
-        """Update dense class utilities with multinomial-probit ADF moments."""
-
-        batch_size = x_batch.shape[0]
-        y_pred_mu, y_pred_var = self.forward(x_batch)
-        if y_pred_mu.dim() != 2:
-            raise ValueError("multinomial-probit ADF currently expects two-dimensional outputs")
-        delta_mu, delta_var = compute_multinomial_probit_adf_innovation(
-            labels,
-            y_pred_mu,
-            y_pred_var,
-            probit_tau2=probit_tau2,
-        )
-        for layer in reversed(self.layers):
-            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
-        cap_factor = get_cap_factor(batch_size)
-        for layer in self.layers:
-            if isinstance(layer, LearnableLayer):
-                layer.update(cap_factor)
-        return y_pred_mu, y_pred_var
-
-    def step_agci(
-        self,
-        x_batch: Tensor,
-        labels: Tensor,
-        tau: float = 1.0,
-        num_quad: int = 48,
-    ) -> tuple[Tensor, Tensor]:
-        """Update utilities with observed-event fixed-noise AGCI moments."""
-
-        batch_size = x_batch.shape[0]
-        y_pred_mu, y_pred_var = self.forward(x_batch)
-        if y_pred_mu.dim() != 2:
-            raise ValueError("AGCI currently expects two-dimensional outputs")
-        delta_mu, delta_var = compute_agci_innovation(
-            labels,
-            y_pred_mu,
-            y_pred_var,
-            tau=tau,
-            num_quad=num_quad,
-        )
-        for layer in reversed(self.layers):
-            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
-        # ``cap_factor_override`` lets a caller bypass the cuTAGI cap heuristic;
-        # a near-zero value makes the cap threshold sqrt(S)/cap unreachable.
-        override = getattr(self, "cap_factor_override", None)
-        cap_factor = override if override is not None else get_cap_factor(batch_size)
-        for layer in self.layers:
-            if isinstance(layer, LearnableLayer):
-                layer.update(cap_factor)
-        return y_pred_mu, y_pred_var
-
-    def step_logit_site(
-        self,
-        x_batch: Tensor,
-        labels: Tensor,
-        *,
-        beta: float = 1.0,
-    ) -> tuple[Tensor, Tensor]:
-        """Update utilities with the minimal prior-mean logit site."""
-
-        batch_size = x_batch.shape[0]
-        y_pred_mu, y_pred_var = self.forward(x_batch)
-        if y_pred_mu.dim() != 2:
-            raise ValueError("logit site currently expects two-dimensional outputs")
-        delta_mu, delta_var = compute_logit_site_innovation(
-            labels, y_pred_mu, y_pred_var, beta=beta
-        )
-        for layer in reversed(self.layers):
-            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
-        override = getattr(self, "cap_factor_override", None)
-        cap_factor = override if override is not None else get_cap_factor(batch_size)
-        for layer in self.layers:
-            if isinstance(layer, LearnableLayer):
-                layer.update(cap_factor)
-        return y_pred_mu, y_pred_var
-
-    def step_core_tail(
-        self,
-        x_batch: Tensor,
-        labels: Tensor,
-        *,
-        beta: float = 1.0,
-        a_star: float = A_STAR,
-        num_iterations: int = DEFAULT_NUM_ITERATIONS,
-    ) -> tuple[Tensor, Tensor]:
-        """Update utilities with the Core-Tail categorical site."""
-
-        batch_size = x_batch.shape[0]
-        y_pred_mu, y_pred_var = self.forward(x_batch)
-        if y_pred_mu.dim() != 2:
-            raise ValueError("the Core-Tail site expects two-dimensional outputs")
-        delta_mu, delta_var = compute_core_tail_site_innovation(
-            labels,
-            y_pred_mu,
-            y_pred_var,
-            beta=beta,
-            a_star=a_star,
-            num_iterations=num_iterations,
-        )
-        for layer in reversed(self.layers):
-            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
-        override = getattr(self, "cap_factor_override", None)
-        cap_factor = override if override is not None else get_cap_factor(batch_size)
-        for layer in self.layers:
-            if isinstance(layer, LearnableLayer):
-                layer.update(cap_factor)
-        return y_pred_mu, y_pred_var
-
-    def step_gumbel_agci(
-        self,
-        x_batch: Tensor,
-        labels: Tensor,
-        *,
-        beta: float = 1.0,
-        num_samples: int = 32,
-        seed: int = 0,
-    ) -> tuple[Tensor, Tensor]:
-        """Update utilities with Gumbel-noise argmax-event AGCI moments."""
-
-        batch_size = x_batch.shape[0]
-        y_pred_mu, y_pred_var = self.forward(x_batch)
-        if y_pred_mu.dim() != 2:
-            raise ValueError("Gumbel AGCI currently expects two-dimensional outputs")
-        delta_mu, delta_var = compute_gumbel_agci_innovation(
-            labels,
-            y_pred_mu,
-            y_pred_var,
-            beta=beta,
-            num_samples=num_samples,
-            seed=seed,
-        )
-        for layer in reversed(self.layers):
-            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
-        override = getattr(self, "cap_factor_override", None)
-        cap_factor = override if override is not None else get_cap_factor(batch_size)
         for layer in self.layers:
             if isinstance(layer, LearnableLayer):
                 layer.update(cap_factor)
