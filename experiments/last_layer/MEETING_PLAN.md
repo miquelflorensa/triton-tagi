@@ -188,6 +188,24 @@ against.
 | eligible runs | `hrc:full` only | the padded tree is refused; the remax and logit heads have no tree gain to fit |
 | groups | 1 / 4 / 9 at K=10, 1 / 7 / 99 at K=100, 1 / 10 / 999 at K=1000 | per-node is data-starved on ImageNet: 999 groups against 25 000 validation rows |
 
+**Validated end to end on real data, and it replicates the finished study.**
+Smoke-tested against a full-tree `hrc` screen checkpoint (CIFAR-10, 20 epochs,
+gain 0.3, `sigma_v` 0.3, `zero`) before the expensive path ever ran:
+
+| arm | this `calibrate` path | `hsm_calibration` study, n=10 000 |
+|---|---|---|
+| uncalibrated | 0.9461 / 0.1951 / 0.0059 | 0.9481 / 0.1893 / 0.0049 |
+| `global` | 0.9461 / 0.1951 / 0.0056 | 0.9480 / 0.1891 / 0.0053 |
+| `level` | 0.9463 / 0.1868 / 0.0071 | 0.9482 / 0.1818 / 0.0065 |
+| `node` | 0.9464 / 0.1848 / 0.0068 | 0.9482 / 0.1802 / 0.0067 |
+
+(acc / NLL / ECE.) Two independent code paths on two separately trained
+checkpoints agree on the shape — a global gain buys nothing, level and node
+buy 4-5% of NLL, ECE degrades slightly — and the uniform ~0.005 NLL offset is
+the different training config. Rows sum to 1.000000. Cost is negligible: 0.1-0.2 s
+to fit the belief and 0.3 s to read 10 000 test rows, so the corruption sweep
+adds roughly 22 s per sharing level per checkpoint.
+
 Driver: `run_study.py calibrate --dataset <ds> --stage init_confirm`, which
 fits the gain and re-evaluates clean + SVHN + corruptions through
 `hsm_class_moments`, so the calibrated rows carry the **native epistemic** OOD
