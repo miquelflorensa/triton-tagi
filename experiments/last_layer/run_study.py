@@ -401,6 +401,66 @@ def tagiv_configs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def init_screen_configs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """The mean-initialization grid: init x gain x sigma_v, per head.
+
+    ``logit_tagiv`` zeroes its own latent means, so "random" and "zero" are the
+    same head for it and only the distinct arms are emitted. Deduplicating here
+    rather than dropping the rows later keeps the cell count honest.
+    """
+
+    study = manifest["init_study"]
+    configs = [
+        {
+            "head": head,
+            "sigma_v": sigma_v,
+            "gain_w": gain,
+            "gain_b": gain,
+            "mean_init": mean_init,
+        }
+        for head, mean_init, gain, sigma_v in itertools.product(
+            study["fixed_noise_heads"],
+            study["mean_init"],
+            study["tied_gains"],
+            study["sigma_v"],
+        )
+    ]
+    configs.extend(
+        {
+            "head": head,
+            "sigma_v": None,
+            "gain_w": gain,
+            "gain_b": gain,
+            "mean_init": mean_init,
+        }
+        for head, mean_init, gain in itertools.product(
+            study["logit_heads"],
+            [arm for arm in study["mean_init"] if arm != "random"],
+            study["tied_gains"],
+        )
+    )
+    return configs
+
+
+def init_confirm_configs(manifest: dict[str, Any], dataset: str) -> list[dict[str, Any]]:
+    """The selected arm per head, plus its ``random`` counterpart for the delta.
+
+    Table 2 of the deck is the initialization delta at the full protocol, not
+    only at 20 epochs, so every head is confirmed twice: once at whatever the
+    screen chose and once at the status quo it is being compared against.
+    """
+
+    selected = load_selection(manifest, dataset, "init_screen")["selected"]
+    configs: list[dict[str, Any]] = []
+    for choice in selected.values():
+        base = dict(choice["config"])
+        configs.append(base)
+        baseline = {**base, "mean_init": "random"}
+        if baseline not in configs:
+            configs.append(baseline)
+    return configs
+
+
 def load_selection(manifest: dict[str, Any], dataset: str, stage: str) -> dict[str, Any]:
     path = stage_root(manifest, stage, dataset) / "selection.json"
     with path.open() as handle:
@@ -424,6 +484,22 @@ def stage_configs(
             manifest["screen"]["seeds"],
             manifest["screen"]["epochs"],
             manifest["screen"]["checkpoints"],
+        )
+    if stage == "init_screen":
+        phase = manifest["init_study"]["screen"]
+        return (
+            init_screen_configs(manifest),
+            phase["seeds"],
+            phase["epochs"],
+            phase["checkpoints"],
+        )
+    if stage == "init_confirm":
+        phase = manifest["init_study"]["confirm"]
+        return (
+            init_confirm_configs(manifest, dataset),
+            phase["seeds"],
+            phase["epochs"],
+            phase["checkpoints"],
         )
     if stage == "tagiv":
         return (
@@ -488,7 +564,20 @@ def stage_configs(
             manifest["confirmation"]["epochs"],
             manifest["confirmation"]["checkpoints"],
         )
-    raise ValueError("stage must be screen, refine, tagiv, or confirm")
+    raise ValueError(
+        "stage must be screen, refine, tagiv, confirm, init_screen, or init_confirm"
+    )
+
+
+def backbone_fc_weights(
+    manifest: dict[str, Any], dataset: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the trained backbone's ``fc`` weight and bias for the warm start."""
+
+    state = torch.load(
+        backbone_path(manifest, dataset), map_location="cpu", weights_only=False
+    )["model_state_dict"]
+    return state["network.fc.weight"], state["network.fc.bias"]
 
 
 def native_diagnostics(classifier, features: torch.Tensor) -> dict[str, float]:
@@ -549,11 +638,29 @@ def run_configuration(
     atomic_json(run_dir / "config.json", run_config)
 
     seed_everything(seed)
+    head_kwargs = dict(config)
+    if head_kwargs.get("mean_init") == "backbone":
+        # Tensors cannot live in the JSON config, so they are looked up here
+        # and never enter the run hash; mean_init alone identifies the arm.
+        head_kwargs["backbone_fc"] = backbone_fc_weights(manifest, dataset)
+    targets = None
+    if config["head"] == "logit_tagiv":
+        if "logits" not in train:
+            raise ValueError(
+                f"{dataset} features carry no teacher logits, which logit_tagiv needs"
+            )
+        # The head regresses class-centered teacher logits.
+        targets = train["logits"] - train["logits"].mean(dim=1, keepdim=True)
+        head_kwargs.setdefault(
+            "logit_variance_feature_energy",
+            float((train["features"] ** 2).sum(dim=1).mean()),
+        )
+        head_kwargs.setdefault("logit_variance_weight_share", 0.0)
     classifier = TAGILastLayerClassifier(
         train["features"].shape[1],
         get_spec(dataset).num_classes,
         device=args.device,
-        **config,
+        **head_kwargs,
     )
     cohort_size = min(
         manifest["last_layer"]["diagnostic_cohort_size"],
@@ -567,6 +674,7 @@ def run_configuration(
     history = classifier.fit(
         train["features"],
         train["labels"],
+        targets=targets,
         epochs=epochs,
         batch_size=manifest["last_layer"]["batch_size"],
         seed=seed,
@@ -612,11 +720,15 @@ def run_stage(args, manifest: dict[str, Any]) -> None:
 def select_stage(args, manifest: dict[str, Any]) -> None:
     root = stage_root(manifest, args.stage, args.dataset)
     candidates = []
-    checkpoint_epochs = set(
-        manifest["confirmation"]["checkpoints"]
-        if args.stage == "confirm"
-        else manifest["screen"]["checkpoints"]
-    )
+    if args.stage.startswith("init_"):
+        phase = "confirm" if args.stage == "init_confirm" else "screen"
+        checkpoint_epochs = set(manifest["init_study"][phase]["checkpoints"])
+    else:
+        checkpoint_epochs = set(
+            manifest["confirmation"]["checkpoints"]
+            if args.stage == "confirm"
+            else manifest["screen"]["checkpoints"]
+        )
     for history_path in root.glob("*/*/history.json"):
         config = json.loads((history_path.parent / "config.json").read_text())
         records = json.loads(history_path.read_text())
@@ -632,6 +744,7 @@ def select_stage(args, manifest: dict[str, Any]) -> None:
                                 "sigma_v",
                                 "gain_w",
                                 "gain_b",
+                                "mean_init",
                                 "v2bar_init",
                                 "v2bar_weight_var",
                                 "v2bar_bias_var",
@@ -957,13 +1070,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = subparsers.add_parser("run")
     run.add_argument("--dataset", choices=("cifar10", "cifar100"), required=True)
-    run.add_argument("--stage", choices=("screen", "refine", "tagiv", "confirm"), required=True)
+    run.add_argument(
+        "--stage",
+        choices=("screen", "refine", "tagiv", "confirm", "init_screen", "init_confirm"),
+        required=True,
+    )
     run.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     run.add_argument("--force", action="store_true")
 
     select = subparsers.add_parser("select")
     select.add_argument("--dataset", choices=("cifar10", "cifar100"), required=True)
-    select.add_argument("--stage", choices=("screen", "refine", "tagiv", "confirm"), required=True)
+    select.add_argument(
+        "--stage",
+        choices=("screen", "refine", "tagiv", "confirm", "init_screen", "init_confirm"),
+        required=True,
+    )
 
     evaluate = subparsers.add_parser("evaluate")
     evaluate.add_argument("--dataset", choices=("cifar10", "cifar100"), required=True)

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "study_id": "imagenet_init_study",
+  "paths": {
+    "features": "runs/imagenet/resnet18_agci/features_shuffled",
+    "artifacts": "runs/imagenet/init_study"
+  },
+  "comment": "ImageNet-1k arm of the mean-initialization study (MEETING_PLAN.md). Accuracy and calibration only: no OOD source is cached, which was decided rather than overlooked. Streams the frozen ResNet-18 features shard by shard; the 17 GB logit_tagiv train shard is not used here, teacher logits come from features_shuffled.",
+  "last_layer": { "batch_size": 256, "validation_batch_size": 1024 },
+  "fixed_noise_heads": ["hrc", "remax_lognormal", "remax_laplace_diag"],
+  "logit_heads": ["logit_tagiv"],
+  "mean_init": ["random", "zero", "backbone"],
+  "tied_gains": [0.1, 0.3, 1.0],
+  "sigma_v": [0.1, 0.3],
+  "screen": { "seeds": [0], "epochs": 1 },
+  "confirm": { "seeds": [0, 1, 2], "epochs": 4 }
+}

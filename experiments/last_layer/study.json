@@ -36,36 +36,186 @@
       "remax_laplace_diag",
       "hrc"
     ],
-    "sigma_v": [0.01, 0.03, 0.05, 0.1, 0.3, 1.0],
-    "tied_gains": [0.03, 0.1, 0.3, 1.0],
-    "gain_master": [0.01, 0.03, 0.1, 0.3, 1.0, 3.0]
+    "sigma_v": [
+      0.01,
+      0.03,
+      0.05,
+      0.1,
+      0.3,
+      1.0
+    ],
+    "tied_gains": [
+      0.03,
+      0.1,
+      0.3,
+      1.0
+    ],
+    "gain_master": [
+      0.01,
+      0.03,
+      0.1,
+      0.3,
+      1.0,
+      3.0
+    ]
   },
   "unit_probit": {
-    "heads": ["hrc_probit"],
-    "tied_gains": [0.03, 0.1, 0.3, 1.0],
-    "gain_master": [0.01, 0.03, 0.1, 0.3, 1.0, 3.0]
+    "heads": [
+      "hrc_probit"
+    ],
+    "tied_gains": [
+      0.03,
+      0.1,
+      0.3,
+      1.0
+    ],
+    "gain_master": [
+      0.01,
+      0.03,
+      0.1,
+      0.3,
+      1.0,
+      3.0
+    ]
   },
   "tagiv": {
-    "heads": ["categorical_tagiv", "hrc_tagiv"],
+    "heads": [
+      "categorical_tagiv",
+      "hrc_tagiv"
+    ],
     "gain_w": 0.1,
     "gain_b": 0.1,
-    "v2bar_init": [0.001, 0.01, 0.1],
-    "v2bar_weight_var": 0.000001,
-    "v2bar_bias_var": [0.1, 1.0]
+    "v2bar_init": [
+      0.001,
+      0.01,
+      0.1
+    ],
+    "v2bar_weight_var": 1e-06,
+    "v2bar_bias_var": [
+      0.1,
+      1.0
+    ]
   },
   "screen": {
-    "seeds": [0],
+    "seeds": [
+      0
+    ],
     "epochs": 20,
-    "checkpoints": [0, 1, 2, 5, 10, 20]
+    "checkpoints": [
+      0,
+      1,
+      2,
+      5,
+      10,
+      20
+    ]
   },
   "confirmation": {
-    "seeds": [0, 1, 2, 3, 4],
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
     "epochs": 200,
-    "checkpoints": [0, 1, 2, 3, 5, 10, 20, 30, 50, 75, 100, 150, 170, 180, 190, 200]
+    "checkpoints": [
+      0,
+      1,
+      2,
+      3,
+      5,
+      10,
+      20,
+      30,
+      50,
+      75,
+      100,
+      150,
+      170,
+      180,
+      190,
+      200
+    ]
   },
   "corruptions": {
     "canonical_count": 15,
-    "severities": [1, 2, 3, 4, 5],
+    "severities": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
     "svhn": true
+  },
+  "init_study": {
+    "comment": "Mean-initialization study (MEETING_PLAN.md). Reuses the v2 features and backbones; writes to heads/init_screen and heads/init_confirm so the v2 screen/refine artifacts stay readable.",
+    "fixed_noise_heads": [
+      "hrc",
+      "remax_lognormal",
+      "remax_laplace_diag"
+    ],
+    "logit_heads": [
+      "logit_tagiv"
+    ],
+    "mean_init": [
+      "random",
+      "zero",
+      "backbone"
+    ],
+    "tied_gains": [
+      0.03,
+      0.1,
+      0.3,
+      1.0
+    ],
+    "sigma_v": [
+      0.05,
+      0.1,
+      0.3
+    ],
+    "screen": {
+      "seeds": [
+        0
+      ],
+      "epochs": 20,
+      "checkpoints": [
+        0,
+        1,
+        2,
+        5,
+        10,
+        20
+      ]
+    },
+    "confirm": {
+      "seeds": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "epochs": 200,
+      "checkpoints": [
+        0,
+        1,
+        2,
+        3,
+        5,
+        10,
+        20,
+        30,
+        50,
+        75,
+        100,
+        150,
+        170,
+        180,
+        190,
+        200
+      ]
+    }
   }
 }

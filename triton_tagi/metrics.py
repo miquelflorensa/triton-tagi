@@ -130,20 +130,26 @@ def classwise_calibration_error(
 
     labels = labels.to(probabilities.device).long()
     _validate_probabilities(probabilities, labels)
-    edges = torch.linspace(0.0, 1.0, n_bins + 1, device=probabilities.device)
-    class_errors = []
-    for class_index in range(probabilities.shape[1]):
-        confidence = probabilities[:, class_index]
-        target = labels.eq(class_index).float()
-        error = probabilities.new_zeros(())
-        for index, (lower, upper) in enumerate(zip(edges[:-1], edges[1:], strict=True)):
-            mask = (confidence >= lower) & (
-                confidence <= upper if index == n_bins - 1 else confidence < upper
-            )
-            if bool(mask.any()):
-                error += mask.float().mean() * (target[mask].mean() - confidence[mask].mean()).abs()
-        class_errors.append(error)
-    return torch.stack(class_errors).mean().item()
+    if n_bins < 1:
+        raise ValueError("n_bins must be positive")
+    samples, classes = probabilities.shape
+
+    # One bin per (class, confidence bucket), flattened so a single scatter
+    # accumulates all of them. floor(p * n_bins) reproduces the half-open
+    # binning [lower, upper) with the last bin closed at one.
+    bucket = (probabilities * n_bins).floor().long().clamp_(0, n_bins - 1)
+    flat = bucket + torch.arange(classes, device=probabilities.device) * n_bins
+
+    one_hot = torch.zeros_like(probabilities).scatter_(1, labels[:, None], 1.0)
+    totals = probabilities.new_zeros(classes * n_bins)
+    target_sum = totals.scatter_add(0, flat.reshape(-1), one_hot.reshape(-1))
+    confidence_sum = totals.scatter_add(0, flat.reshape(-1), probabilities.reshape(-1))
+
+    # Per bin, (count / N) * |mean target - mean confidence| is exactly
+    # |sum target - sum confidence| / N, which also makes an empty bin
+    # contribute zero without a branch.
+    deviation = (target_sum - confidence_sum).abs().reshape(classes, n_bins)
+    return (deviation.sum(dim=1) / samples).mean().item()
 
 
 def selective_classification_metrics(

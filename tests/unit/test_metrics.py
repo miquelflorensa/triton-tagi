@@ -9,12 +9,73 @@ import torch
 
 from triton_tagi.metrics import (
     classification_metrics,
+    classwise_calibration_error,
     evaluate_ood,
     fit_softmax_temperature,
     negative_max_probability,
     ood_detection_metrics,
     predictive_entropy,
 )
+
+
+def classwise_calibration_error_by_binning(
+    probabilities: torch.Tensor, labels: torch.Tensor, n_bins: int = 15
+) -> float:
+    """Mean one-vs-rest ECE, written as an explicit loop over classes and bins.
+
+    The shipped implementation accumulates the same quantity with one scatter,
+    which is ~19x faster at 100 classes and ~700x at 1000 and so is what makes
+    the ImageNet arm of the initialization study affordable. This is the
+    definition it has to agree with.
+    """
+
+    labels = labels.to(probabilities.device).long()
+    edges = torch.linspace(0.0, 1.0, n_bins + 1, device=probabilities.device)
+    class_errors = []
+    for class_index in range(probabilities.shape[1]):
+        confidence = probabilities[:, class_index]
+        target = labels.eq(class_index).float()
+        error = probabilities.new_zeros(())
+        for index, (lower, upper) in enumerate(zip(edges[:-1], edges[1:], strict=True)):
+            mask = (confidence >= lower) & (
+                confidence <= upper if index == n_bins - 1 else confidence < upper
+            )
+            if bool(mask.any()):
+                error += (
+                    mask.float().mean()
+                    * (target[mask].mean() - confidence[mask].mean()).abs()
+                )
+        class_errors.append(error)
+    return torch.stack(class_errors).mean().item()
+
+
+@pytest.mark.parametrize(
+    ("samples", "classes"),
+    ((64, 2), (500, 3), (2000, 10), (2000, 100)),
+)
+def test_classwise_calibration_error_matches_explicit_binning(samples, classes):
+    generator = torch.Generator().manual_seed(samples + classes)
+    probabilities = (3.0 * torch.randn(samples, classes, generator=generator)).softmax(dim=1)
+    labels = torch.randint(0, classes, (samples,), generator=generator)
+    assert classwise_calibration_error(probabilities, labels) == pytest.approx(
+        classwise_calibration_error_by_binning(probabilities, labels), abs=1e-6
+    )
+
+
+def test_classwise_calibration_error_handles_probabilities_at_zero_and_one():
+    """A one-hot head puts mass exactly on a bin edge and exactly at one."""
+
+    probabilities = torch.eye(5).repeat(20, 1)
+    labels = torch.arange(5).repeat(20)
+    assert classwise_calibration_error(probabilities, labels) == pytest.approx(0.0, abs=1e-7)
+    assert classwise_calibration_error(probabilities, labels) == pytest.approx(
+        classwise_calibration_error_by_binning(probabilities, labels), abs=1e-7
+    )
+
+
+def test_classwise_calibration_error_rejects_a_nonpositive_bin_count():
+    with pytest.raises(ValueError, match="n_bins must be positive"):
+        classwise_calibration_error(torch.tensor([[0.5, 0.5]]), torch.tensor([0]), n_bins=0)
 
 
 def test_temperature_scaling_reduces_nll_without_changing_predictions():
