@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import pathlib
 from types import SimpleNamespace
 
 import pytest
@@ -279,3 +280,94 @@ def test_report_leaves_unrecorded_axes_blank(tmp_path):
     assert {row["sigma_v"] for row in report} == {""}
     assert {row["stage"] for row in report} == {""}
     assert {row["gain_w"] for row in report} == {0.3}
+
+
+def test_evaluate_reads_the_requested_confirmation_stage(tmp_path, monkeypatch):
+    """``evaluate --stage init_confirm`` must read the init_confirm tree.
+
+    The stage was hardcoded to ``confirm``, so the initialization study's runs
+    were invisible to evaluation and every deliverable table would have come
+    back empty.
+    """
+
+    manifest = {
+        "study_id": "smoke",
+        "paths": {"artifacts": str(tmp_path)},
+        "confirmation": {"checkpoints": [0, 200]},
+        "init_study": {"confirm": {"checkpoints": [0, 7]}},
+    }
+    root = tmp_path / "smoke"
+    for stage, epoch in (("confirm", 200), ("init_confirm", 7)):
+        run_dir = root / "heads" / stage / "cifar10" / "hrc" / "hash_seed0"
+        (run_dir / "checkpoints").mkdir(parents=True)
+        (run_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "dataset": "cifar10",
+                    "head": "hrc",
+                    "seed": 0,
+                    "epochs": epoch,
+                    "stage": stage,
+                    "mean_init": "zero" if stage == "init_confirm" else None,
+                }
+            )
+        )
+        (run_dir / "history.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "epoch": epoch,
+                        "val_accuracy": 0.9,
+                        "val_nll": 0.3,
+                        "val_brier": 0.1,
+                        "val_ece": 0.02,
+                    }
+                ]
+            )
+        )
+        (run_dir / "checkpoints" / f"epoch_{epoch:04d}.pt").write_text("stub")
+
+    visited = []
+
+    def _fake_load(checkpoint, device=None):
+        visited.append(pathlib.Path(checkpoint))
+        return object(), {"epoch": int(pathlib.Path(checkpoint).stem.split("_")[1])}
+
+    features = root / "features" / "cifar10"
+    generator = torch.Generator().manual_seed(3)
+    for name in ("test", "svhn"):
+        save_feature_shard(
+            features / f"{name}.pt",
+            {
+                "features": torch.randn(8, 5, generator=generator),
+                "logits": torch.randn(8, 10, generator=generator),
+                "labels": torch.arange(8) % 10,
+            },
+            {"fingerprint": name},
+        )
+
+    monkeypatch.setattr(
+        runner.TAGILastLayerClassifier, "load", staticmethod(_fake_load)
+    )
+    monkeypatch.setattr(
+        runner,
+        "predict_batches",
+        lambda classifier, inputs, batch_size: (
+            torch.full((inputs.shape[0], 10), 0.1),
+            torch.full((inputs.shape[0],), 0.5),
+        ),
+    )
+
+    runner.evaluate_study(
+        SimpleNamespace(dataset="cifar10", stage="init_confirm", device="cpu", batch_size=4),
+        manifest,
+    )
+
+    assert [path.stem for path in visited] == ["epoch_0007"]
+    evaluations = root / "evaluations" / "cifar10"
+    assert (evaluations / "pytorch_softmax.json").exists()
+    written = sorted(
+        path.relative_to(evaluations).as_posix()
+        for path in evaluations.glob("**/epoch_*.json")
+    )
+    assert written == ["init_confirm/hrc/hash_seed0/epoch_0007.json"]

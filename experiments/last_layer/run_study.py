@@ -828,8 +828,25 @@ def evaluate_probabilities(
     return result
 
 
+CONFIRM_STAGES = {
+    "confirm": ("confirmation", None),
+    "init_confirm": ("init_study", "init_confirm"),
+}
+
+
+def confirm_checkpoints(manifest: dict[str, Any], stage: str) -> set[int]:
+    """Return the checkpoint epochs the given confirmation stage saved."""
+
+    if stage == "init_confirm":
+        return set(manifest["init_study"]["confirm"]["checkpoints"])
+    return set(manifest["confirmation"]["checkpoints"])
+
+
 def evaluate_study(args, manifest: dict[str, Any]) -> None:
     dataset = args.dataset
+    stage = getattr(args, "stage", None) or "confirm"
+    if stage not in CONFIRM_STAGES:
+        raise ValueError(f"evaluate expects a confirmation stage, got {stage}")
     features = feature_root(manifest, dataset)
     clean = load_feature_shard(features / "test.pt")
     svhn = load_feature_shard(features / "svhn.pt")
@@ -853,12 +870,15 @@ def evaluate_study(args, manifest: dict[str, Any]) -> None:
         )
     atomic_json(output_root / "pytorch_softmax.json", baseline)
 
-    confirm = stage_root(manifest, "confirm", dataset)
+    confirm = stage_root(manifest, stage, dataset)
+    # ``confirm`` keeps the original flat layout so the evaluations already on
+    # disk stay where the v2 report expects them; later stages get a subtree.
+    run_output_root = output_root if stage == "confirm" else output_root / stage
     for run_config_path in confirm.glob("*/*/config.json"):
         run_dir = run_config_path.parent
         config = json.loads(run_config_path.read_text())
         history = json.loads((run_dir / "history.json").read_text())
-        checkpoint_epochs = set(manifest["confirmation"]["checkpoints"])
+        checkpoint_epochs = confirm_checkpoints(manifest, stage)
         selectable = [
             row for row in history if int(row["epoch"]) in checkpoint_epochs
         ]
@@ -909,7 +929,7 @@ def evaluate_study(args, manifest: dict[str, Any]) -> None:
                     labels_ood=shard["labels"],
                 )
             relative = run_dir.relative_to(confirm)
-            destination = output_root / relative / f"epoch_{epoch:04d}.json"
+            destination = run_output_root / relative / f"epoch_{epoch:04d}.json"
             atomic_json(destination, result)
             print(f"evaluated {destination}")
 
@@ -1124,6 +1144,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     evaluate = subparsers.add_parser("evaluate")
     evaluate.add_argument("--dataset", choices=("cifar10", "cifar100"), required=True)
+    evaluate.add_argument(
+        "--stage", choices=tuple(CONFIRM_STAGES), default="confirm"
+    )
     evaluate.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     evaluate.add_argument("--batch-size", type=int, default=512)
 
