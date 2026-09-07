@@ -41,3 +41,11 @@ results_*.json
 *.pt
 *.pth
 *.ckpt
+
+# LaTeX build artifacts
+*.aux
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.log
+*.out

@@ -16,6 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "ruff>=0.4"]
 vis = ["matplotlib>=3.7"]
+examples = ["torchvision>=0.15"]
 validation = ["pytagi"]
 
 [tool.hatch.build.targets.wheel]

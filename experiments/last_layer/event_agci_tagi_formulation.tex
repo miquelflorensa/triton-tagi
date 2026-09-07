@@ -1,0 +1,1077 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Var}{\operatorname{var}}
+\newcommand{\Cov}{\operatorname{cov}}
+\newcommand{\Normal}{\mathcal{N}}
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\trans}{\intercal}
+\newcommand{\Olayer}{\mathtt{O}}
+
+\title{Event-Based Approximate Gaussian Categorical Inference\\
+within the TAGI Framework}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Purpose and relationship with TAGI}
+
+Tractable Approximate Gaussian Inference (TAGI) propagates Gaussian moments
+through a neural network and computes the posterior moments of the output units
+$\bm Z^{(\Olayer)}$ before recursively propagating those moments backward using
+Gaussian conditional (RTS) equations.  For a continuous observation, the
+standard TAGI observation model is
+\begin{equation}
+    \bm Y = \bm Z^{(\Olayer)} + \bm V,
+    \qquad
+    \bm V \sim \Normal(\bm 0,\bm\Sigma_{\bm V}).
+\end{equation}
+This model is not appropriate for a one-hot categorical observation.  Event
+AGCI replaces only this output observation model.  The TAGI forward pass and
+the recursive TAGI backward pass remain unchanged.
+
+For a class observation $Y=c$, Event AGCI performs the following sequence:
+\begin{equation}
+\boxed{
+\begin{gathered}
+\text{TAGI prior for }\bm Z^{(\Olayer)}
+\;\longrightarrow\;
+\text{class-winning event}
+\;\longrightarrow\;
+\text{event-conditioned moments}
+\\[-0.2em]
+\longrightarrow\;
+\text{TAGI RTS backward pass}
+\end{gathered}}
+\end{equation}
+
+\section{TAGI prior for the output units}
+
+For one input, the TAGI forward pass supplies
+\begin{equation}
+ f(\bm z^{(\Olayer)})
+ =
+ \Normal\!\left(
+ \bm z^{(\Olayer)};
+ \bm\mu_{\bm Z^{(\Olayer)}},
+ \bm\Sigma_{\bm Z^{(\Olayer)}}
+ \right).
+ \label{eq:tagi-output-prior}
+\end{equation}
+For $K$ classes, $\bm Z^{(\Olayer)}\in\mathbb R^K$ contains one latent
+utility per class.  The standard diagonal TAGI approximation is
+\begin{equation}
+ \bm\Sigma_{\bm Z^{(\Olayer)}}
+ =
+ \diag\!\left(
+ (\sigma_{Z_1^{(\Olayer)}})^2,
+ \ldots,
+ (\sigma_{Z_K^{(\Olayer)}})^2
+ \right).
+ \label{eq:diagonal-output-prior}
+\end{equation}
+For concision, define
+\begin{equation}
+ \bm\mu \equiv \bm\mu_{\bm Z^{(\Olayer)}},
+ \qquad
+ \bm\Sigma \equiv \bm\Sigma_{\bm Z^{(\Olayer)}},
+ \qquad
+ v_k \equiv (\sigma_{Z_k^{(\Olayer)}})^2.
+\end{equation}
+
+\section{Initialization of a TAGI last layer over frozen features}
+\label{sec:initialization}
+
+Let a deterministic neural network be frozen and let its final feature vector
+be
+\begin{equation}
+ \bm H=f_{\mathrm{det}}(\bm x)\in\mathbb R^D.
+\end{equation}
+Only the final affine layer is treated probabilistically:
+\begin{equation}
+ Z_k^{(\Olayer)}
+ =
+ \bm W_k^\trans\bm H+B_k,
+ \qquad k=1,\ldots,K.
+ \label{eq:frozen-last-layer}
+\end{equation}
+The diagonal Gaussian prior is
+\begin{equation}
+ q_0(\bm W,\bm B)
+ =
+ \prod_{d=1}^{D}\prod_{k=1}^{K}
+ \Normal(W_{k,d};\mu_{W_{k,d},0},(\sigma_{W_{k,d},0})^2)
+ \prod_{k=1}^{K}
+ \Normal(B_k;\mu_{B_k,0},(\sigma_{B_k,0})^2).
+ \label{eq:last-layer-prior}
+\end{equation}
+
+\subsection{Prior means}
+
+For a newly initialized classifier with no prior preference among classes, use
+\begin{equation}
+ \boxed{
+ \mu_{W_{k,d},0}=0,
+ \qquad
+ \mu_{B_k,0}=0.}
+ \label{eq:zero-prior-means}
+\end{equation}
+This produces equal utility means and, under class-symmetric variances, the
+uniform prior predictive distribution
+\begin{equation}
+ P(Y=k)=\frac{1}{K}.
+\end{equation}
+Random parameter means are not needed to break symmetry: the first labeled
+observations create different class-specific posterior updates.  Random means
+would instead center the Bayesian prior on one arbitrary deterministic
+classifier.
+
+The multinomial-probit likelihood is invariant to a common utility offset.  A
+zero-mean initialization fixes the location of the prior mean, but a fully
+zero-sum random parameterization would require cross-class covariance or a
+$K-1$ contrast parameterization.  The standard diagonal family fixes only the
+mean gauge.
+
+\subsection{Feature preprocessing}
+
+The scale of an isotropic weight prior is meaningful only relative to the
+feature coordinates.  Estimate all feature statistics using training data
+only.  A recommended preprocessing sequence is:
+\begin{enumerate}
+ \item estimate and subtract the training-feature mean;
+ \item optionally whiten the features or apply one global root-mean-square
+ scale;
+ \item freeze this transform and reuse it for validation and test inputs;
+ \item initialize the TAGI prior in the transformed coordinates.
+\end{enumerate}
+Define the mean per-coordinate feature energy
+\begin{equation}
+ e_H
+ =
+ \frac{1}{D}\E_{\bm H}\!\left[\lVert\bm H\rVert^2\right].
+ \label{eq:feature-energy}
+\end{equation}
+
+\subsection{Prior variances from a dimensionless utility scale}
+
+Use a class-symmetric isotropic weight prior
+\begin{equation}
+ (\sigma_{W_{k,d},0})^2
+ =
+ \frac{g_W^2}{D},
+ \label{eq:weight-prior-scale}
+\end{equation}
+and a bias prior
+\begin{equation}
+ (\sigma_{B_k,0})^2=\sigma_{B,0}^2.
+ \label{eq:bias-prior-scale}
+\end{equation}
+The expected prior utility variance is then
+\begin{align}
+ \E_{\bm H}\!\left[
+ (\sigma_{Z_k^{(\Olayer)},0})^2
+ \right]
+ &=
+ \E_{\bm H}\!\left[
+ \sum_{d=1}^{D}H_d^2\frac{g_W^2}{D}
+ +\sigma_{B,0}^2
+ \right]
+ \\
+ &=
+ g_W^2e_H+\sigma_{B,0}^2.
+ \label{eq:expected-prior-utility-variance}
+\end{align}
+Define the dimensionless prior utility ratio
+\begin{equation}
+ \boxed{
+ \kappa^2
+ =
+ \frac{
+ \E_{\bm H}[(\sigma_{Z_k^{(\Olayer)},0})^2]
+ }{\tau^2}.}
+ \label{eq:kappa-definition}
+\end{equation}
+For fixed $\tau$, selected $\kappa$, and selected bias variance, the weight
+scale is
+\begin{equation}
+ \boxed{
+ g_W
+ =
+ \sqrt{
+ \frac{
+ \kappa^2\tau^2-\sigma_{B,0}^2
+ }{e_H}
+ },}
+ \qquad
+ \kappa^2\tau^2>\sigma_{B,0}^2.
+ \label{eq:weight-gain-initialization}
+\end{equation}
+Thus $\tau$ fixes the likelihood unit, $\kappa$ specifies prior uncertainty
+relative to that unit, and $e_H$ converts the dimensionless prior choice into
+a parameter variance.  If an implementation scales the bias variance by fan
+in, $(\sigma_{B_k,0})^2=g_B^2/D$, substitute $g_B^2/D$ for
+$\sigma_{B,0}^2$ in Equations
+\eqref{eq:expected-prior-utility-variance}--\eqref{eq:weight-gain-initialization}.
+
+A small $\kappa$ represents a concentrated prior and produces small posterior
+movement.  A large $\kappa$ represents greater prior uncertainty and permits
+larger evidence-driven updates.  Choosing $\kappa$ using validation likelihood
+is an empirical-Bayes hyperparameter selection and should be reported as such.
+
+\subsection{Pretrained last-layer means}
+
+If the deterministic classifier already contains fitted final-layer
+parameters $(\bm W_\star,\bm B_\star)$, a warm-start prior may use
+\begin{equation}
+ \bm\mu_{\bm W,0}=\bm W_\star,
+ \qquad
+ \bm\mu_{\bm B,0}=\bm B_\star.
+\end{equation}
+Its covariance should quantify uncertainty around that fitted solution.  In
+decreasing order of fidelity, use a covariance retained from the original
+training procedure, a Laplace or Fisher approximation, or a declared diagonal
+effective prior variance.  A trusted pretrained mean should not normally be
+combined with the same diffuse covariance used for a new zero-mean layer.
+
+If the pretrained classifier was fitted on the same observations subsequently
+assimilated by Event AGCI, those observations are counted twice.  Such a warm
+start is an empirical-Bayes or recycled-evidence approximation, not ordinary
+sequential Bayes.  Before reuse, subtract the common class-wise mean from the
+pretrained weights and biases; this removes the deterministic common utility
+offset without changing class probabilities.
+
+\section{Gaussian random-utility observation model}
+
+Introduce an independent Gaussian decision-noise vector
+\begin{equation}
+ \bm E \sim \Normal(\bm 0,\tau^2\mathbf I_K),
+ \qquad \tau>0,
+ \label{eq:decision-noise}
+\end{equation}
+and define the noisy utilities
+\begin{equation}
+ \bm A = \bm Z^{(\Olayer)} + \bm E.
+ \label{eq:noisy-utilities}
+\end{equation}
+It follows that
+\begin{equation}
+ f(\bm a)
+ =
+ \Normal(\bm a;\bm\mu_{\bm A},\bm\Sigma_{\bm A}),
+ \qquad
+ \bm\mu_{\bm A}=\bm\mu,
+ \qquad
+ \bm\Sigma_{\bm A}=\bm\Sigma+\tau^2\mathbf I_K.
+ \label{eq:utility-prior}
+\end{equation}
+The observed categorical class is the index of the largest noisy utility:
+\begin{equation}
+ Y=c
+ \quad\Longleftrightarrow\quad
+ A_c>A_j \quad\text{for every }j\ne c.
+ \label{eq:winning-event}
+\end{equation}
+The one-hot representation of the observation is $\bm y=\bm e_c$.  Equation
+\eqref{eq:winning-event} defines a multinomial-probit categorical likelihood.
+It guarantees non-negative class probabilities that sum to one without
+interpreting the Gaussian output means as probabilities.
+
+The scale $\tau$ is fixed and must be identical during training and prediction.
+A convenient reference choice is $\tau=1$, which fixes the latent-utility unit.
+
+\section{Probability of a class-winning event}
+
+Under the diagonal prior in \eqref{eq:diagonal-output-prior}, the noisy
+utilities are independent, with
+\begin{equation}
+ A_k\sim\Normal(\mu_k,r_k^2),
+ \qquad
+ r_k^2=v_k+\tau^2.
+ \label{eq:utility-marginal}
+\end{equation}
+Conditioning temporarily on $A_c=a$, define
+\begin{equation}
+ \alpha_j(a)=\frac{a-\mu_j}{r_j},
+ \qquad j\ne c.
+\end{equation}
+The probability that every competing utility is below $a$ is
+\begin{equation}
+ P(A_j<a,\ \forall j\ne c\mid A_c=a)
+ =
+ \prod_{j\ne c}\Phi\!\left(\alpha_j(a)\right),
+\end{equation}
+where $\Phi(\cdot)$ is the standard Gaussian cumulative distribution function.
+Therefore, the predictive probability of class $c$ is the one-dimensional
+integral
+\begin{equation}
+ p_c
+ \equiv P(Y=c)
+ =
+ \int_{-\infty}^{\infty}
+ \Normal(a;\mu_c,r_c^2)
+ \prod_{j\ne c}\Phi\!\left(\alpha_j(a)\right)
+ \,da.
+ \label{eq:class-probability}
+\end{equation}
+Although the class event contains $K-1$ inequalities, independence of the
+incoming utilities reduces its probability to one dimension.
+
+Define the unnormalized event density
+\begin{equation}
+ w_c(a)
+ =
+ \Normal(a;\mu_c,r_c^2)
+ \prod_{j\ne c}\Phi\!\left(\alpha_j(a)\right).
+\end{equation}
+The event-conditioned density of the winning noisy utility is
+\begin{equation}
+ q_c(a)
+ \equiv f(a_c=a\mid Y=c)
+ =\frac{w_c(a)}{p_c}.
+ \label{eq:winner-density}
+\end{equation}
+
+\section{Event-conditioned moments of the noisy utilities}
+
+\subsection{Winning utility}
+
+The first two moments of the winning utility are
+\begin{align}
+ \mu_{A_c\mid\bm y}
+ &=
+ \E[A_c\mid Y=c]
+ =
+ \int a\,q_c(a)\,da,
+ \label{eq:winner-mean}
+ \\
+ \E[A_c^2\mid Y=c]
+ &=
+ \int a^2 q_c(a)\,da.
+ \label{eq:winner-second}
+\end{align}
+Hence
+\begin{equation}
+ (\sigma_{A_c\mid\bm y})^2
+ =
+ \E[A_c^2\mid Y=c]
+ -\mu_{A_c\mid\bm y}^2.
+ \label{eq:winner-variance}
+\end{equation}
+
+\subsection{Losing utilities}
+
+For $j\ne c$, conditioning on $A_c=a$ and $Y=c$ implies $A_j<a$.
+Consequently, $A_j$ follows an upper-truncated Gaussian.  Define the inverse
+Mills ratio
+\begin{equation}
+ \lambda_j(a)
+ =
+ \frac{\phi(\alpha_j(a))}{\Phi(\alpha_j(a))},
+ \label{eq:mills-ratio}
+\end{equation}
+where $\phi(\cdot)$ is the standard Gaussian density.  The conditional mean
+and variance at a fixed winner value $a$ are
+\begin{align}
+ m_j(a)
+ &\equiv
+ \E[A_j\mid A_j<a]
+ =
+ \mu_j-r_j\lambda_j(a),
+ \label{eq:loser-local-mean}
+ \\
+ s_j^2(a)
+ &\equiv
+ \Var(A_j\mid A_j<a)
+ \\
+ &=
+ r_j^2\left[
+ 1-\alpha_j(a)\lambda_j(a)-\lambda_j(a)^2
+ \right].
+ \label{eq:loser-local-variance}
+\end{align}
+Integrating with respect to the event-conditioned winner density gives
+\begin{align}
+ \mu_{A_j\mid\bm y}
+ &=
+ \int m_j(a)q_c(a)\,da,
+ \label{eq:loser-mean}
+ \\
+ \E[A_j^2\mid Y=c]
+ &=
+ \int\left[s_j^2(a)+m_j(a)^2\right]q_c(a)\,da,
+ \label{eq:loser-second}
+ \\
+ (\sigma_{A_j\mid\bm y})^2
+ &=
+ \E[A_j^2\mid Y=c]-\mu_{A_j\mid\bm y}^2.
+ \label{eq:loser-variance}
+\end{align}
+
+\subsection{Dense covariance created by the class event}
+
+Although the noisy utilities are independent before observing the class, the
+shared winning event creates cross-class covariance.  The required cross
+moments are
+\begin{align}
+ \E[A_cA_j\mid Y=c]
+ &=
+ \int a\,m_j(a)q_c(a)\,da,
+ &&j\ne c,
+ \label{eq:winner-loser-cross}
+ \\
+ \E[A_jA_\ell\mid Y=c]
+ &=
+ \int m_j(a)m_\ell(a)q_c(a)\,da,
+ &&j\ne\ell,\quad j,\ell\ne c.
+ \label{eq:loser-loser-cross}
+\end{align}
+Collecting the first moments in $\bm\mu_{\bm A\mid\bm y}$ and the second
+moments in $\E[\bm A\bm A^\trans\mid\bm y]$ yields
+\begin{equation}
+ \bm\Sigma_{\bm A\mid\bm y}
+ =
+ \E[\bm A\bm A^\trans\mid\bm y]
+ -
+ \bm\mu_{\bm A\mid\bm y}
+ \bm\mu_{\bm A\mid\bm y}^\trans.
+ \label{eq:event-utility-covariance}
+\end{equation}
+When the subsequent TAGI representation retains only marginal variances,
+Equations \eqref{eq:winner-loser-cross}--\eqref{eq:loser-loser-cross} need not
+be evaluated; only the diagonal of \eqref{eq:event-utility-covariance} is
+required.
+
+\section{Event-conditioned posterior moments of the TAGI output}
+
+Before observing the class, $\bm Z^{(\Olayer)}$ and $\bm A$ are jointly
+Gaussian.  Their cross-covariance is
+\begin{equation}
+ \bm\Sigma_{\bm Z^{(\Olayer)}\bm A}
+ =
+ \bm\Sigma_{\bm Z^{(\Olayer)}}.
+\end{equation}
+Define the Gaussian conditional gain
+\begin{equation}
+ \boxed{
+ \mathbf J_{\bm Z^{(\Olayer)}}^{\bm A}
+ =
+ \bm\Sigma_{\bm Z^{(\Olayer)}\bm A}
+ \bm\Sigma_{\bm A}^{-1}
+ =
+ \bm\Sigma_{\bm Z^{(\Olayer)}}
+ \left(
+ \bm\Sigma_{\bm Z^{(\Olayer)}}+\tau^2\mathbf I_K
+ \right)^{-1}.}
+ \label{eq:z-a-gain}
+\end{equation}
+Applying the law of total expectation to the Gaussian conditional
+$f(\bm z^{(\Olayer)}\mid\bm a)$ gives
+\begin{equation}
+ \boxed{
+ \bm\mu_{\bm Z^{(\Olayer)}\mid\bm y}
+ =
+ \bm\mu_{\bm Z^{(\Olayer)}}
+ +
+ \mathbf J_{\bm Z^{(\Olayer)}}^{\bm A}
+ \left(
+ \bm\mu_{\bm A\mid\bm y}-\bm\mu_{\bm A}
+ \right).}
+ \label{eq:event-output-mean}
+\end{equation}
+The law of total covariance gives
+\begin{equation}
+ \boxed{
+ \bm\Sigma_{\bm Z^{(\Olayer)}\mid\bm y}
+ =
+ \bm\Sigma_{\bm Z^{(\Olayer)}}
+ +
+ \mathbf J_{\bm Z^{(\Olayer)}}^{\bm A}
+ \left(
+ \bm\Sigma_{\bm A\mid\bm y}-\bm\Sigma_{\bm A}
+ \right)
+ \left(\mathbf J_{\bm Z^{(\Olayer)}}^{\bm A}\right)^\trans.}
+ \label{eq:event-output-covariance}
+\end{equation}
+Equations \eqref{eq:event-output-mean} and
+\eqref{eq:event-output-covariance} have the same RTS form as the TAGI
+backward equations.  The difference is that the posterior moments of
+$\bm A\mid\bm y$ are produced by the class-winning event instead of a linear
+Gaussian observation.
+
+For diagonal output covariance, define
+\begin{equation}
+ \beta_k
+ =
+ \frac{v_k}{v_k+\tau^2}.
+\end{equation}
+Then the output update reduces componentwise to
+\begin{align}
+ \boxed{
+ \mu_{Z_k^{(\Olayer)}\mid\bm y}
+ =
+ \mu_{Z_k^{(\Olayer)}}
+ +
+ \beta_k
+ \left(
+ \mu_{A_k\mid\bm y}-\mu_{Z_k^{(\Olayer)}}
+ \right),}
+ \label{eq:diagonal-output-mean}
+ \\
+ \boxed{
+ (\sigma_{Z_k^{(\Olayer)}\mid\bm y})^2
+ =
+ v_k
+ +
+ \beta_k^2
+ \left[
+ (\sigma_{A_k\mid\bm y})^2-(v_k+\tau^2)
+ \right].}
+ \label{eq:diagonal-output-variance}
+\end{align}
+
+The exact event posterior is non-Gaussian.  Event AGCI forms the
+moment-matched Gaussian approximation
+\begin{equation}
+ f(\bm z^{(\Olayer)}\mid\bm y)
+ \approx
+ \Normal\!\left(
+ \bm z^{(\Olayer)};
+ \bm\mu_{\bm Z^{(\Olayer)}\mid\bm y},
+ \bm\Sigma_{\bm Z^{(\Olayer)}\mid\bm y}
+ \right).
+ \label{eq:moment-projection}
+\end{equation}
+Standard diagonal TAGI subsequently retains only
+$\diag(\bm\Sigma_{\bm Z^{(\Olayer)}\mid\bm y})$.
+
+\section{TAGI backward inference}
+
+Once Event AGCI has supplied the posterior output moments in
+\eqref{eq:event-output-mean}--\eqref{eq:event-output-covariance}, the ordinary
+TAGI backward pass is unchanged.  Let
+\begin{equation}
+ \bm Z\equiv\bm Z^{(j)},
+ \qquad
+ \bm Z^+\equiv\bm Z^{(j+1)}.
+\end{equation}
+The hidden-unit posterior moments are
+\begin{align}
+ \bm\mu_{\bm Z\mid\bm y}
+ &=
+ \bm\mu_{\bm Z}
+ +
+ \mathbf J_{\bm Z}
+ \left(
+ \bm\mu_{\bm Z^+\mid\bm y}-\bm\mu_{\bm Z^+}
+ \right),
+ \\
+ \bm\Sigma_{\bm Z\mid\bm y}
+ &=
+ \bm\Sigma_{\bm Z}
+ +
+ \mathbf J_{\bm Z}
+ \left(
+ \bm\Sigma_{\bm Z^+\mid\bm y}-\bm\Sigma_{\bm Z^+}
+ \right)
+ \mathbf J_{\bm Z}^\trans,
+ \\
+ \mathbf J_{\bm Z}
+ &=
+ \bm\Sigma_{\bm Z\bm Z^+}
+ \bm\Sigma_{\bm Z^+}^{-1}.
+ \label{eq:event-rts-hidden}
+\end{align}
+For the parameters $\bm\theta\equiv\bm\theta^{(j)}$,
+\begin{align}
+ \bm\mu_{\bm\theta\mid\bm y}
+ &=
+ \bm\mu_{\bm\theta}
+ +
+ \mathbf J_{\bm\theta}
+ \left(
+ \bm\mu_{\bm Z^+\mid\bm y}-\bm\mu_{\bm Z^+}
+ \right),
+ \\
+ \bm\Sigma_{\bm\theta\mid\bm y}
+ &=
+ \bm\Sigma_{\bm\theta}
+ +
+ \mathbf J_{\bm\theta}
+ \left(
+ \bm\Sigma_{\bm Z^+\mid\bm y}-\bm\Sigma_{\bm Z^+}
+ \right)
+ \mathbf J_{\bm\theta}^\trans,
+ \\
+ \mathbf J_{\bm\theta}
+ &=
+ \bm\Sigma_{\bm\theta\bm Z^+}
+ \bm\Sigma_{\bm Z^+}^{-1}.
+ \label{eq:event-rts-parameters}
+\end{align}
+
+\subsection{Explicit last-layer update}
+
+To avoid confusing the noisy utility $\bm A$ with the activation entering the
+last layer, denote the deterministic final-layer feature by
+$H_d^{(\Olayer-1)}=h_d$.  The
+output unit is
+\begin{equation}
+ Z_k^{(\Olayer)}
+ =
+ \sum_d W_{k,d}^{(\Olayer-1)}h_d
+ +B_k^{(\Olayer-1)}.
+\end{equation}
+Under diagonal parameter covariance,
+\begin{align}
+ \Cov\!\left(
+ W_{k,d}^{(\Olayer-1)},Z_k^{(\Olayer)}
+ \right)
+ &=
+ (\sigma_{W_{k,d}^{(\Olayer-1)}})^2h_d,
+ \\
+ \Cov\!\left(
+ B_k^{(\Olayer-1)},Z_k^{(\Olayer)}
+ \right)
+ &=
+ (\sigma_{B_k^{(\Olayer-1)}})^2.
+\end{align}
+Define the standardized output-moment changes
+\begin{align}
+ \delta_{\mu,k}
+ &=
+ \frac{
+ \mu_{Z_k^{(\Olayer)}\mid\bm y}
+ -\mu_{Z_k^{(\Olayer)}}
+ }{v_k},
+ \\
+ \delta_{v,k}
+ &=
+ \frac{
+ (\sigma_{Z_k^{(\Olayer)}\mid\bm y})^2-v_k
+ }{v_k^2}.
+\end{align}
+The diagonal parameter updates are
+\begin{align}
+ \mu_{W_{k,d}^{(\Olayer-1)}\mid\bm y}
+ &=
+ \mu_{W_{k,d}^{(\Olayer-1)}}
+ +(\sigma_{W_{k,d}^{(\Olayer-1)}})^2h_d\,\delta_{\mu,k},
+ \\
+ (\sigma_{W_{k,d}^{(\Olayer-1)}\mid\bm y})^2
+ &=
+ (\sigma_{W_{k,d}^{(\Olayer-1)}})^2
+ +(\sigma_{W_{k,d}^{(\Olayer-1)}})^4h_d^2\,\delta_{v,k},
+ \\
+ \mu_{B_k^{(\Olayer-1)}\mid\bm y}
+ &=
+ \mu_{B_k^{(\Olayer-1)}}
+ +(\sigma_{B_k^{(\Olayer-1)}})^2\delta_{\mu,k},
+ \\
+ (\sigma_{B_k^{(\Olayer-1)}\mid\bm y})^2
+ &=
+ (\sigma_{B_k^{(\Olayer-1)}})^2
+ +(\sigma_{B_k^{(\Olayer-1)}})^4\delta_{v,k}.
+\end{align}
+
+\section{Mini-batch Event-AGCI}
+\label{sec:minibatches}
+
+\subsection{Sequential ADF reference update}
+
+The direct Bayesian interpretation is sequential.  Starting from a prior
+$q_0(\bm\theta)$, observation $n$ is assimilated as
+\begin{equation}
+ q_n(\bm\theta)
+ =
+ \operatorname{Project}_{\mathcal G}
+ \left[
+ p(\bm y_n\mid\bm\theta)q_{n-1}(\bm\theta)
+ \right],
+ \label{eq:sequential-adf}
+\end{equation}
+where $\operatorname{Project}_{\mathcal G}$ denotes moment projection into the
+chosen diagonal Gaussian family.  Each observation is therefore evaluated
+using the posterior state produced by the preceding observation.  Batch size
+one most closely implements Equation \eqref{eq:sequential-adf}.
+
+\subsection{Shared-state parallel batch approximation}
+
+Let a mini-batch contain $N_b$ deterministic feature vectors, arranged as
+\begin{equation}
+ \mathbf H_b
+ =
+ \begin{bmatrix}
+ \bm h_1^\trans\\
+ \vdots\\
+ \bm h_{N_b}^\trans
+ \end{bmatrix}
+ \in\mathbb R^{N_b\times D}.
+\end{equation}
+For every example, compute the TAGI output prior and the Event-AGCI posterior
+moments using the same pre-batch parameter state.  Collect the standardized
+moment changes in
+\begin{equation}
+ \bm\Delta_\mu
+ =
+ [\delta_{\mu,nk}]
+ \in\mathbb R^{N_b\times K},
+ \qquad
+ \bm\Delta_v
+ =
+ [\delta_{v,nk}]
+ \in\mathbb R^{N_b\times K}.
+\end{equation}
+Let $\bm M_{\bm W},\bm S_{\bm W}\in\mathbb R^{K\times D}$ denote the
+last-layer weight means and marginal variances, and let
+$\bm m_{\bm B},\bm s_{\bm B}\in\mathbb R^K$ denote the bias means and
+variances.  Summing the one-example RTS contributions gives the parallel batch
+update
+\begin{align}
+ \boxed{
+ \bm M_{\bm W}^{+}
+ =
+ \bm M_{\bm W}
+ +
+ \bm S_{\bm W}\odot
+ \left(\bm\Delta_\mu^\trans\mathbf H_b\right),}
+ \label{eq:batch-weight-mean}
+ \\
+ \boxed{
+ \bm S_{\bm W}^{+}
+ =
+ \bm S_{\bm W}
+ +
+ \bm S_{\bm W}^{\odot 2}\odot
+ \left[
+ \bm\Delta_v^\trans
+ (\mathbf H_b\odot\mathbf H_b)
+ \right],}
+ \label{eq:batch-weight-variance}
+ \\
+ \boxed{
+ \bm m_{\bm B}^{+}
+ =
+ \bm m_{\bm B}
+ +
+ \bm s_{\bm B}\odot
+ \left(\bm\Delta_\mu^\trans\bm 1_{N_b}\right),}
+ \label{eq:batch-bias-mean}
+ \\
+ \boxed{
+ \bm s_{\bm B}^{+}
+ =
+ \bm s_{\bm B}
+ +
+ \bm s_{\bm B}^{\odot 2}\odot
+ \left(\bm\Delta_v^\trans\bm 1_{N_b}\right).}
+ \label{eq:batch-bias-variance}
+\end{align}
+Here $\odot$ denotes elementwise multiplication and
+$\bm S^{\odot 2}=\bm S\odot\bm S$.
+
+For ordinary one-pass evidence assimilation, the per-example contributions in
+Equations \eqref{eq:batch-weight-mean}--\eqref{eq:batch-bias-variance} are
+\emph{summed}, not averaged.  Replacing the sum by a batch average weakens each
+batch likelihood by approximately a factor $1/N_b$ and is closer to a tempered
+or generalized-Bayes update.
+
+\subsection{What batching approximates}
+
+The parallel update is not equal to sequential ADF because all examples use a
+shared pre-batch state.  In particular, it neglects:
+\begin{enumerate}
+ \item the change in parameter moments after each observation;
+ \item posterior correlations between the outputs of different examples that
+ arise because they share the same random parameters;
+ \item cross-class and cross-parameter covariance removed by the diagonal
+ projection.
+\end{enumerate}
+Consequently, smaller batches are closer to sequential ADF, whereas larger
+batches provide greater computational throughput and average event-specific
+covariance fluctuations.
+
+For a fixed input, the Event-AGCI covariance obeys
+\begin{equation}
+ \E_{Y\sim\operatorname{Categorical}(\bm p)}
+ \left[
+ \bm\Sigma_{\bm Z^{(\Olayer)}\mid Y}
+ \right]
+ =
+ \sum_{c=1}^{K}p_c
+ \bm\Sigma_{\bm Z^{(\Olayer)}\mid Y=c}.
+ \label{eq:event-covariance-average}
+\end{equation}
+The right-hand side is the residual covariance of full LMMSE-AGCI.  A shuffled
+batch therefore makes the observed-event covariance update behave like a
+stochastic estimate of the class-averaged covariance when the model
+probabilities are close to the data-label probabilities.  This explains why
+large, representative batches can make Event AGCI and full LMMSE-AGCI nearly
+indistinguishable after one pass.
+
+\subsection{Recommended batching protocol}
+
+A defensible protocol for a frozen-feature TAGI last layer is:
+\begin{enumerate}
+ \item compute and freeze all feature preprocessing using training data only;
+ \item initialize the prior once using Section \ref{sec:initialization};
+ \item globally shuffle examples before assimilation;
+ \item use batches that are approximately representative of the full class
+ distribution;
+ \item compute every Event-AGCI moment from the same pre-batch state;
+ \item sum the per-example updates and commit one posterior state per batch;
+ \item verify that all updated variances remain positive;
+ \item assimilate every training observation once for the cleanest ordinary
+ Bayesian interpretation.
+\end{enumerate}
+Class-ordered batches should be avoided because ADF is order-dependent.  If a
+variance update becomes invalid, first reduce the batch size or prior scale.
+A coordinate-wise cap is a numerical heuristic and changes the stated
+moment-matching update; if used frequently, it should be reported.
+
+Repeated passes over the same data do not represent repeated refinement of one
+ordinary posterior.  Ideally, $E$ passes correspond to the power posterior
+\begin{equation}
+ p_E(\bm\theta\mid\mathcal D)
+ \propto
+ p(\bm\theta)
+ p(\mathcal D\mid\bm\theta)^E,
+\end{equation}
+with additional discrepancy caused by ADF projection and batching.  Multiple
+passes should therefore be described as tempered or generalized-Bayes
+inference rather than ordinary one-pass Bayes.
+
+\section{Gauss--Hermite quadrature}
+
+Let $x_q$ and $w_q$, $q=1,\ldots,Q$, be Gauss--Hermite nodes and weights for
+integrals with weight $\exp(-x^2)$.  Set
+\begin{equation}
+ a_q=\mu_c+\sqrt{2}\,r_c x_q.
+\end{equation}
+Equation \eqref{eq:class-probability} is approximated by
+\begin{equation}
+ p_c
+ \approx
+ \frac{1}{\sqrt\pi}
+ \sum_{q=1}^{Q}
+ w_q
+ \prod_{j\ne c}
+ \Phi\!\left(
+ \frac{a_q-\mu_j}{r_j}
+ \right).
+ \label{eq:gh-probability}
+\end{equation}
+Define normalized event weights
+\begin{equation}
+ \omega_q
+ =
+ \frac{
+ w_q\prod_{j\ne c}\Phi(\alpha_j(a_q))
+ }{
+ \sum_{\ell=1}^{Q}
+ w_\ell\prod_{j\ne c}\Phi(\alpha_j(a_\ell))
+ }.
+ \label{eq:gh-event-weights}
+\end{equation}
+The integrals in Sections 5 and 6 are then evaluated as weighted sums.  For
+example,
+\begin{align}
+ \mu_{A_c\mid\bm y}
+ &\approx
+ \sum_q\omega_qa_q,
+ \\
+ \mu_{A_j\mid\bm y}
+ &\approx
+ \sum_q\omega_qm_j(a_q),
+ \\
+ \E[A_j^2\mid Y=c]
+ &\approx
+ \sum_q\omega_q\left[s_j^2(a_q)+m_j(a_q)^2\right].
+\end{align}
+For numerical stability, the products of Gaussian CDFs should be formed in
+the log domain, and $\lambda_j(a)$ should be evaluated using
+$\log\phi(\alpha_j)-\log\Phi(\alpha_j)$.
+
+\section{Efficient diagonal Event-AGCI algorithm}
+
+For one labeled example $(\bm x,c)$, the diagonal algorithm is:
+\begin{enumerate}
+ \item Perform the TAGI forward pass and obtain
+ $\bm\mu_{\bm Z^{(\Olayer)}}$ and
+ $\diag(\bm\Sigma_{\bm Z^{(\Olayer)}})$.
+
+ \item Compute $r_k^2=v_k+\tau^2$ for every class.
+
+ \item Use the observed winner $c$ as the one-dimensional quadrature variable
+ and compute the normalized event weights in
+ \eqref{eq:gh-event-weights}.
+
+ \item Compute $\mu_{A_k\mid\bm y}$ and
+ $(\sigma_{A_k\mid\bm y})^2$ for every class using
+ \eqref{eq:winner-mean}--\eqref{eq:loser-variance}.
+
+ \item Transform those moments to
+ $\mu_{Z_k^{(\Olayer)}\mid\bm y}$ and
+ $(\sigma_{Z_k^{(\Olayer)}\mid\bm y})^2$ using
+ \eqref{eq:diagonal-output-mean}--\eqref{eq:diagonal-output-variance}.
+
+ \item Propagate the output posterior moments backward with the ordinary TAGI
+ equations \eqref{eq:event-rts-hidden}--\eqref{eq:event-rts-parameters}.
+\end{enumerate}
+For $Q$ quadrature nodes, the diagonal observed-event calculation is
+$O(QK)$ per example and does not require a dense $K\times K$ event covariance.
+
+\section{Relationship with full LMMSE-AGCI}
+
+Let
+\begin{equation}
+ \bm p=(p_1,\ldots,p_K)^\trans,
+ \qquad
+ \bm m_c=\E[\bm Z^{(\Olayer)}\mid Y=c].
+\end{equation}
+The categorical observation covariance is
+\begin{equation}
+ \bm\Sigma_{\bm Y}
+ =
+ \diag(\bm p)-\bm p\bm p^\trans,
+\end{equation}
+and the output--label cross-covariance has columns
+\begin{equation}
+ [\bm\Sigma_{\bm Z^{(\Olayer)}\bm Y}]_{:,c}
+ =
+ p_c
+ \left(
+ \bm m_c-\bm\mu_{\bm Z^{(\Olayer)}}
+ \right).
+\end{equation}
+The full categorical LMMSE gain is
+\begin{equation}
+ \mathbf J_{\mathrm{AGCI}}
+ =
+ \bm\Sigma_{\bm Z^{(\Olayer)}\bm Y}
+ \bm\Sigma_{\bm Y}^{\dagger}.
+\end{equation}
+Its mean update is
+\begin{equation}
+ \bm\mu_{\bm Z^{(\Olayer)}}
+ +
+ \mathbf J_{\mathrm{AGCI}}
+ (\bm e_c-\bm p)
+ =
+ \bm m_c.
+\end{equation}
+Thus Event AGCI and full LMMSE-AGCI have the same class-conditional mean when
+their moments are evaluated consistently.  They differ in their covariance:
+\begin{align}
+ \text{Event AGCI:}\quad
+ &\bm\Sigma_{\bm Z^{(\Olayer)}\mid Y=c},
+ \\
+ \text{Full LMMSE-AGCI:}\quad
+ &\sum_{c=1}^{K}
+ p_c\bm\Sigma_{\bm Z^{(\Olayer)}\mid Y=c}.
+\end{align}
+Consequently,
+\begin{equation}
+ \E_{Y\sim\operatorname{Categorical}(\bm p)}
+ \left[
+ \bm\Sigma_{\bm Z^{(\Olayer)}\mid Y}
+ \right]
+ =
+ \bm\Sigma_{\bm Z^{(\Olayer)},\mathrm{LMMSE}}^+.
+\end{equation}
+Event AGCI therefore uses the covariance associated with the observed event,
+whereas full LMMSE-AGCI uses the class-averaged residual covariance.
+
+There is no separate squared-label channel in categorical AGCI because a
+one-hot observation satisfies $\bm Y\odot\bm Y=\bm Y$.  Its second-moment
+information is already contained in
+$\diag(\bm p)-\bm p\bm p^\trans$.
+
+\section{Approximation boundary}
+
+\begin{center}
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.43\textwidth}
+                >{\raggedright\arraybackslash}p{0.43\textwidth}}
+\toprule
+Exact under the stated model & Approximate in the implemented method \\
+\midrule
+Gaussian random-utility likelihood
+& Numerical Gauss--Hermite integration \\
+One-dimensional event representation for diagonal utilities
+& Gaussian projection of the non-Gaussian event posterior \\
+Gaussian transformation from $\bm A\mid\bm y$ to the first two moments of
+$\bm Z^{(\Olayer)}\mid\bm y$
+& Removal of event-induced cross-class covariance \\
+Class-specific output moments up to quadrature error
+& Diagonal parameter covariance and layer-wise conditional independence \\
+One-observation TAGI/RTS moment propagation
+& Shared-state mini-batches, observation ordering, repeated passes, and any
+update cap or damping \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Implementation checks}
+
+The following checks should hold up to numerical quadrature error:
+\begin{enumerate}
+ \item Predictive probabilities form a partition:
+ \begin{equation}
+  \sum_{c=1}^{K}p_c=1.
+ \end{equation}
+
+ \item Posterior covariance is symmetric and positive semidefinite:
+ \begin{equation}
+  \bm\Sigma_{\bm Z^{(\Olayer)}\mid\bm y}
+  =
+  \bm\Sigma_{\bm Z^{(\Olayer)}\mid\bm y}^{\trans},
+  \qquad
+  \lambda_{\min}
+  (\bm\Sigma_{\bm Z^{(\Olayer)}\mid\bm y})
+  \ge -\varepsilon.
+ \end{equation}
+
+ \item Translation invariance holds for any scalar $a$:
+ \begin{equation}
+  p_c(\bm\mu+a\bm 1,\bm\Sigma,\tau)
+  =p_c(\bm\mu,\bm\Sigma,\tau).
+ \end{equation}
+
+ \item Joint scale invariance holds for $a>0$:
+ \begin{equation}
+  p_c(a\bm\mu,a^2\bm\Sigma,a\tau)
+  =p_c(\bm\mu,\bm\Sigma,\tau).
+ \end{equation}
+
+ \item For $K=2$, the quadrature moments agree with the analytical moments of
+ a univariate truncated Gaussian utility difference.
+\end{enumerate}
+
+\section{Summary}
+
+Event AGCI replaces the linear Gaussian TAGI observation model with a proper
+categorical likelihood induced by Gaussian random utilities.  For the observed
+class, it computes the first two moments of the class-winning event, transforms
+those moments into posterior moments for the TAGI output units, and propagates
+them backward using the unchanged TAGI RTS equations.  In compact form,
+\begin{equation}
+\boxed{
+\bm Z^{(\Olayer)}
+\xrightarrow{\;\bm A=\bm Z^{(\Olayer)}+\bm E\;}
+Y=\arg\max_k A_k
+\xrightarrow{\;\text{event moments}\;}
+f(\bm z^{(\Olayer)}\mid\bm y)
+\xrightarrow{\;\text{TAGI RTS}\;}
+f(\bm\theta\mid\bm y).}
+\end{equation}
+
+\end{document}

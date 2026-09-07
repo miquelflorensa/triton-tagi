@@ -1,0 +1,294 @@
+\documentclass[letterpaper]{article}
+
+\topmargin = 0.8cm
+\oddsidemargin=0.60in % leftmargin is 1 inch
+\textwidth=5.5in
+\linespread{1.1} % Line spacing
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{amsfonts,amssymb,latexsym,amscd}
+\usepackage{bm}
+\usepackage{amsmath,mathtools}
+\usepackage{soul} 
+\usepackage{subfigure}
+\usepackage[textsize=tiny,textwidth=1.4cm]{todonotes}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{epstopdf}
+\usepackage{pdfpages}
+\usepackage{longtable}
+\usepackage{fancyhdr}
+\usepackage{color}
+\usepackage{enumerate}
+\usepackage{lipsum}
+\usepackage{alltt}
+\usepackage{tikz}
+\usepackage{url}
+\usetikzlibrary{calc,patterns,decorations.pathmorphing,decorations.markings,decorations.pathreplacing}
+\usepackage{cancel}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[linkcolor=black,colorlinks=true,urlcolor=blue]{hyperref}
+\usepackage{wrapfig}
+\usepackage{lastpage}
+\usepackage[yyyymmdd,hhmmss]{datetime}
+\usepackage[algoruled,linesnumbered,vlined,titlenotnumbered]{algorithm2e}
+
+
+\cfoot{}
+\cfoot{\thepage\ of \pageref{LastPage}}
+%\rfoot{[\today]}
+
+
+\oddsidemargin=-0.25in % leftmargin is 1 inch
+\voffset=-0.9in % leftmargin is 1 inch
+\textwidth=7in
+\textheight=9.25in
+\headsep = 36pt
+
+\newcommand\independent{\protect\mathpalette{\protect\independenT}{\perp}}
+\def\independenT#1#2{\mathrel{\rlap{$#1#2$}\mkern2mu{#1#2}}}
+
+\newcommand{\courseS}{Hierarchical Softmax Calibration}
+\newcommand{\deptS}{Polytechnique Montréal}
+\newcommand{\profS}{J.A. Goulet, L.H. Nguyen \& M. Florensa-Motilla}
+\newcommand{\dateS}{\today}
+\newcommand{\titleS}{~}
+
+
+\author{\courseS \\ \deptS\\ Enseignant: \profS\\[6pt] \dateS}
+\date{}
+
+\pagestyle{fancy}
+\fancyhead{}
+\fancyhead[c]{ \sc \courseS \hfill \profS\\ \raggedright \deptS \hfill \dateS  }
+\fancyfoot{}
+\fancyfoot[l]{\tiny (Last update : \today, \currenttime)\\[6pt]}
+\fancyfoot[c]{\thepage/\pageref{LastPage}}
+
+\newcommand{\titleshort}{\titleS}
+
+\begin{document}
+\title{\titleS }
+
+\section{Context}\label{S:Context}
+In the hierarchical binary decomposition employed by TAGI for classification (Goulet, Nguyen \& Amiri, JMLR 2021, Appendix~C), a class $\mathcal C=(\mathcal C_1,\dots,\mathcal C_{\mathtt H})\in\{0,1\}^{\mathtt H}$, $\mathtt H=\lceil\log_2\mathtt K\rceil$, is identified with a path in a binary tree. Each node $h$ on the path is associated with an output-layer hidden state $Z_h\sim\mathcal N(\mu_h,\sigma_h^2)$ and a branch sign $s_h=(-1)^{\mathcal C_h}$, and the class probability is
+\begin{equation}
+p(\mathcal C\mid\mathcal D)=\prod_{h=1}^{\mathtt H}\Phi\!\left(\frac{s_h\,\mu_h}{\sqrt{\alpha^2+\sigma_h^2}}\right),
+\label{E:tagi}
+\end{equation}
+where $\Phi$ is the standard normal CDF and $\alpha$ a fixed scaling hyperparameter. Each factor of \eqref{E:tagi} is the expected value $\mathbb E[\Phi(s_hZ_h/\alpha)]$: the uncertainty on $Z_h$ is marginalized, but the class probability itself carries no variance, and the scale $\alpha$ has to be tuned by hand.
+
+This note does two things.
+\begin{enumerate}[(i)]
+\item Each factor $\Phi(\cdot)$ is treated as a random variable whose mean, variance and covariance with the hidden states are obtained in closed form (\S\ref{S:Phi}). The factors are then multiplied with the Gaussian multiplicative approximation (GMA), so that the class probability $Z^{\Pr}_{\mathcal C}$ is itself Gaussian with a covariance with respect to the output layer (\S\ref{S:HSM}).
+\item The fixed scale $1/\alpha$ is replaced by a Gaussian \emph{gain} $G_h$ at each node, learned from the class labels through an auxiliary observation model (\S\ref{S:cal}). The network keeps learning in logit space from $\pm1$ targets exactly as in TAGI; the auxiliary channel updates the gains only.
+\end{enumerate}
+Section~\ref{S:ex} illustrates everything on the two-class, single-node case. Notation: $\varphi$ is the standard normal PDF, $\Phi_2(\cdot,\cdot;\rho)$ the standard bivariate normal CDF with correlation $\rho$, and
+\begin{equation}
+T(h,b)=\frac{1}{2\pi}\int_0^{b}\frac{e^{-h^2(1+t^2)/2}}{1+t^2}\,\mathrm dt
+\end{equation}
+is Owen's $T$ function (\texttt{scipy.special.owens\_t}). As everywhere in TAGI, the hidden states of a same layer are independent.
+
+\section{Moments of $\Phi(X)$ for a Gaussian $X$}\label{S:Phi}
+Let $X\sim\mathcal N(\mu,\sigma^2)$ and define
+\begin{equation}
+a=\frac{\mu}{\sqrt{1+\sigma^2}},\qquad \rho=\frac{\sigma^2}{1+\sigma^2}.
+\end{equation}
+Let $W,W_1,W_2\sim\mathcal N(0,1)$ be independent of $X$ and of each other, so that $\Phi(X)=\Pr(W\le X\mid X)$.
+
+\paragraph{Mean.} $\mathbb E[\Phi(X)]=\Pr(W-X\le0)$ with $W-X\sim\mathcal N(-\mu,\,1+\sigma^2)$, hence
+\begin{equation}
+\mathbb E[\Phi(X)]=\Phi(a).
+\label{E:mean}
+\end{equation}
+
+\paragraph{Variance.} Conditionally on $X$ the events $\{W_1\le X\}$ and $\{W_2\le X\}$ are independent, so $\mathbb E[\Phi(X)^2]=\Pr(W_1-X\le0,\,W_2-X\le0)=\Phi_2(a,a;\rho)$, the pair $(W_1-X,W_2-X)$ having variances $1+\sigma^2$ and covariance $\sigma^2$. With the equal-argument identity $\Phi_2(h,h;\rho)=\Phi(h)-2T\big(h,\sqrt{(1-\rho)/(1+\rho)}\big)$ and $\sqrt{(1-\rho)/(1+\rho)}=1/\sqrt{1+2\sigma^2}$,
+\begin{equation}
+\operatorname{Var}[\Phi(X)]=\Phi(a)\big(1-\Phi(a)\big)-2\,T\!\Big(a,\tfrac{1}{\sqrt{1+2\sigma^2}}\Big),
+\qquad
+\mathbb E\big[\Phi(X)\big(1-\Phi(X)\big)\big]=2\,T\!\Big(a,\tfrac{1}{\sqrt{1+2\sigma^2}}\Big).
+\label{E:var}
+\end{equation}
+The second expression is the expected Bernoulli variance of the indicator $\mathbb 1\{W\le X\}$ given $X$; it is used in \S\ref{S:cal}. Because $\Phi(a)(1-\Phi(a))=2T(a,1)$, the variance is also
+\begin{equation}
+\operatorname{Var}[\Phi(X)]=\frac{1}{\pi}\int_{b}^{1}\frac{e^{-a^2(1+t^2)/2}}{1+t^2}\,\mathrm dt,\qquad b=\frac{1}{\sqrt{1+2\sigma^2}},
+\label{E:varint}
+\end{equation}
+which is positive by construction and avoids the cancellation between the two terms of \eqref{E:var} when $\sigma$ is small; an 8-point Gauss--Legendre rule on $[b,1]$ evaluates it to $10^{-12}$ over $|a|\le8$, so Owen's $T$ never has to be coded.
+
+\paragraph{Covariance.} Stein's identity $\mathbb E[(X-\mu)g(X)]=\sigma^2\mathbb E[g'(X)]$ with $g=\Phi$, together with $\mathbb E[\varphi(X)]=f_{X-W}(0)=\varphi(a)/\sqrt{1+\sigma^2}$, gives
+\begin{equation}
+\operatorname{Cov}(X,\Phi(X))=\sigma^2\,\mathbb E[\varphi(X)]=\frac{\sigma^2\,\varphi(a)}{\sqrt{1+\sigma^2}}=\sigma^2\,\frac{\partial\,\mathbb E[\Phi(X)]}{\partial\mu}.
+\label{E:cov}
+\end{equation}
+
+\section{Hierarchical softmax with a Gaussian gain}\label{S:HSM}
+\subsection{Node level}
+At node $h$, the gain $G_h\sim\mathcal N(\mu_{G_h},\sigma^2_{G_h})$ is independent of $Z_h$ (it is a parameter, like a weight), and the branch probability is $P_h=\Phi(s_hS_h)$ with the scaled logit $S_h=G_hZ_h$. The product is treated with the GMA: $S_h$ is taken Gaussian with its exact moments
+\begin{equation}
+\mu_{S_h}=\mu_{G_h}\mu_h,\qquad
+\sigma^2_{S_h}=\sigma^2_{G_h}\sigma_h^2+\sigma^2_{G_h}\mu_h^2+\mu^2_{G_h}\sigma_h^2 .
+\label{E:S}
+\end{equation}
+Applying \S\ref{S:Phi} to $X=s_hS_h$ with
+\begin{equation}
+a_h=\frac{s_h\,\mu_{S_h}}{\sqrt{1+\sigma^2_{S_h}}},\qquad b_h=\frac{1}{\sqrt{1+2\sigma^2_{S_h}}},
+\label{E:a}
+\end{equation}
+gives the mean and variance of the branch probability,
+\begin{equation}
+\mu_{P_h}=\Phi(a_h),\qquad
+\sigma^2_{P_h}=\Phi(a_h)\big(1-\Phi(a_h)\big)-2T(a_h,b_h)=\frac1\pi\int_{b_h}^{1}\frac{e^{-a_h^2(1+t^2)/2}}{1+t^2}\,\mathrm dt .
+\label{E:cond}
+\end{equation}
+For the covariances, Stein's identity applies to each Gaussian input separately. Because $P_h$ is a smooth function of $Z_h$ and of $G_h$, and the derivative of $\mathbb E[\Phi(s_hG_hZ_h)]$ with respect to the mean of one input equals the expectation of the partial derivative with respect to that input,
+\begin{equation}
+\operatorname{Cov}(Z_h,P_h)=\sigma_h^2\,\frac{\partial\mu_{P_h}}{\partial\mu_h},\qquad
+\operatorname{Cov}(G_h,P_h)=\sigma^2_{G_h}\,\frac{\partial\mu_{P_h}}{\partial\mu_{G_h}}
+\label{E:stein}
+\end{equation}
+hold exactly. Differentiating $\mu_{P_h}=\Phi(a_h)$, in which $\sigma^2_{S_h}$ depends on both means, gives the closed forms
+\begin{equation}
+\boxed{\;
+\begin{aligned}
+\mu_{P_h}&=\Phi(a_h),\\
+\operatorname{Cov}(Z_h,P_h)&=\frac{s_h\,\sigma_h^2\,\mu_{G_h}\,\big(1+\sigma^2_{S_h}-\sigma^2_{G_h}\mu_h^2\big)}{(1+\sigma^2_{S_h})^{3/2}}\,\varphi(a_h),\\
+\operatorname{Cov}(G_h,P_h)&=\frac{s_h\,\sigma^2_{G_h}\,\mu_h\,\big(1+\sigma^2_{S_h}-\mu^2_{G_h}\sigma_h^2\big)}{(1+\sigma^2_{S_h})^{3/2}}\,\varphi(a_h).
+\end{aligned}\;}
+\label{E:node}
+\end{equation}
+For a fixed gain, $\sigma_{G_h}=0$, the mean reduces to the branch probability conditional on $G_h=g$,
+\begin{equation}
+m_h(g)=\Phi\!\left(\frac{s_h\,g\,\mu_h}{\sqrt{1+g^2\sigma_h^2}}\right),\qquad
+m_h'(g)=\frac{s_h\,\mu_h\,\varphi\big(s_hg\mu_h/\sqrt{1+g^2\sigma_h^2}\big)}{(1+g^2\sigma_h^2)^{3/2}},
+\label{E:mg}
+\end{equation}
+and $\operatorname{Cov}(G_h,P_h)\to\sigma^2_{G_h}m_h'(\mu_{G_h})$; both are used in \S\ref{S:cal}. The only approximation in \eqref{E:node} is the Gaussian treatment of $S_h$. It is exact when either $\sigma_h=0$ or $\sigma_{G_h}=0$, since the product is then Gaussian, and the error in between is small: for the worked example of \S\ref{S:ex} ($\mu_h=0.5$, $\sigma_h=0.5$, $G_h\sim\mathcal N(1.5,0.3^2)$) the four moments $\mu_{P_h}$, $\sigma_{P_h}$, $\operatorname{Cov}(Z_h,P_h)$, $\operatorname{Cov}(G_h,P_h)$ are $0.7229$, $0.2142$, $0.0977$, $0.00773$ against Monte Carlo $0.7226$, $0.2076$, $0.0982$, $0.00786$, and with a wide prior on the gain ($\sigma_{G_h}=1$) $\operatorname{Cov}(G_h,P_h)$ stays within $10\%$ of the exact value.
+
+Three remarks. First, projecting through $S_h$ in the usual TAGI manner,
+\begin{equation}
+\operatorname{Cov}(G_h,P_h)\approx\frac{\operatorname{Cov}(G_h,S_h)\operatorname{Cov}(S_h,P_h)}{\sigma^2_{S_h}}=\frac{s_h\,\sigma^2_{G_h}\,\mu_h\,\varphi(a_h)}{\sqrt{1+\sigma^2_{S_h}}},
+\end{equation}
+is not equivalent to \eqref{E:node}: it lacks the factor $(1+\sigma^2_{S_h}-\mu^2_{G_h}\sigma_h^2)/(1+\sigma^2_{S_h})$, which tends to $1/(1+\mu^2_{G_h}\sigma_h^2)$ as $\sigma_{G_h}\to0$, because it ignores that a larger gain also widens $S_h$. The projection therefore exceeds \eqref{E:node} by $(1+\sigma^2_{S_h})/(1+\sigma^2_{S_h}-\mu^2_{G_h}\sigma_h^2)\approx1+\mu^2_{G_h}\sigma_h^2$: $1.54$ for the worked example of \S\ref{S:ex}, $3.0$ at $\sigma_h=1$ with $\mu_{G_h}=1.5$, and between $1.4$ and $6.7$ over the stream of \S\ref{S:ex} once the gain is near $2$. Used in \S\ref{S:cal} it makes the gain posterior over-confident; the Stein form is the one to use. Second, the gain update of \S\ref{S:cal} requires $\operatorname{Cov}(G_h,P_h)^2\le\sigma^2_{G_h}\mu_{P_h}(1-\mu_{P_h})$. With exact moments this is Cauchy--Schwarz; with \eqref{E:node} it is not guaranteed, but over $2\times10^6$ random combinations covering $|\mu_h|\le8$, $\sigma_h\le4$, $-1\le\mu_{G_h}\le6$ and $\sigma_{G_h}\le5$ the ratio never exceeded $0.64$ (a floor at zero is kept anyway, \S\ref{S:cal}). Third, $\operatorname{sign}\operatorname{Cov}(G_h,P_h)=\operatorname{sign}(s_h\mu_h)$, since $1+\sigma^2_{S_h}-\mu^2_{G_h}\sigma_h^2=1+\sigma^2_{G_h}(\sigma_h^2+\mu_h^2)>0$. The sibling branch at the same node is $1-P_h$: same variance, mean $1-\mu_{P_h}$, covariances of opposite sign. With the gain fixed at $1/\alpha$, $\mu_{P_h}$ is exactly one factor of \eqref{E:tagi}.
+
+\subsection{Class level}
+The class probability $Z^{\Pr}_{\mathcal C}=\prod_{h=1}^{\mathtt H}P_h$ is built recursively as $Q_1=P_1$ and $Q_h=Q_{h-1}P_h$, using the GMA with $\operatorname{Cov}(Q_{h-1},P_h)=0$ (independent nodes). Writing $X_l$ for either $Z_l$ or $G_l$,
+\begin{align}
+\mu_{Q_h}&=\mu_{Q_{h-1}}\mu_{P_h},\\
+\sigma^2_{Q_h}&=\sigma^2_{Q_{h-1}}\sigma^2_{P_h}+\mu^2_{Q_{h-1}}\sigma^2_{P_h}+\mu^2_{P_h}\sigma^2_{Q_{h-1}},\\
+\operatorname{Cov}(Q_h,X_l)&=\begin{cases}\mu_{P_h}\operatorname{Cov}(Q_{h-1},X_l)& l<h,\\ \mu_{Q_{h-1}}\operatorname{Cov}(P_h,X_h)& l=h.\end{cases}
+\end{align}
+Unrolled, for $l$ on the path,
+\begin{equation}
+\boxed{\;
+\begin{aligned}
+\mu_{\Pr}&=\prod_{h=1}^{\mathtt H}\mu_{P_h},\\
+\sigma^2_{\Pr}&=\prod_{h=1}^{\mathtt H}\big(\sigma^2_{P_h}+\mu_{P_h}^2\big)-\prod_{h=1}^{\mathtt H}\mu_{P_h}^2,\\
+\operatorname{Cov}(Z^{\Pr}_{\mathcal C},X_l)&=\operatorname{Cov}(P_l,X_l)\prod_{h\neq l}\mu_{P_h},
+\end{aligned}\;}
+\label{E:class}
+\end{equation}
+and $\operatorname{Cov}(Z^{\Pr}_{\mathcal C},X_l)=0$ for output units off the path. With independent nodes these are the exact moments of the product given the node moments; the Gaussian assumption only enters when $Z^{\Pr}_{\mathcal C}$ is subsequently used as a Gaussian. Since $\mu_{P_h}+(1-\mu_{P_h})=1$ at every node, $\sum_{\mathcal C}\mu_{\Pr}=1$ exactly when $\mathtt K$ is a power of two (otherwise normalize as in TAGI).
+
+\section{Learning the gains from the labels}\label{S:cal}
+\subsection{Which channel learns what}
+The network is trained as in TAGI: for a training sample of class $\mathcal C^\ast$, the $\mathtt H$ path units receive the logit observations $y_h=z_h+v$ with targets $y_h=s_h\in\{-1,+1\}$ and $V\sim\mathcal N(0,\sigma_V^2)$, and the backward pass updates hidden states and parameters. These $\pm1$ targets pin the scale of $Z_h$; the gain $G_h$ therefore only decides how much probability mass one unit of logit is worth, i.e.\ it is a learned per-node calibration (a Platt/temperature scaling). Without the logit channel, $G_h$ would be confounded with the scale of the output weights.
+
+The gains are learned from labels through a second, \emph{auxiliary} observation model in probability space, and the natural place to run it is the validation split, once per epoch, sample by sample: the network is not updated there, so the forward-pass moments $(\mu_h,\sigma_h^2)$ are genuine out-of-sample predictions, and the recursion is a scalar per node, so the pass costs $N_{\text{val}}\,\mathtt H$ evaluations of $\Phi$ and $\varphi$ and needs no batching. This is temperature scaling fitted on the validation set, inside TAGI, after every epoch. The training loop is left exactly as it is.
+
+If the channel is instead run on the training stream (e.g.\ online learning without epochs), two rules apply. It must not update $\bm Z$ (the label is already used by the logit channel), and it must use the forward-pass moments rather than the moments after the logit update: calibration relates a \emph{prediction} to an outcome, the post-update moments are a blend of the two, and a channel fed with them sees predictions that already agree with the label and sharpens the gain without bound (\S\ref{S:ex}). Under these two rules the two channels commute. Training-set predictions are out-of-sample only during the first pass over the data, so the first epoch is the only one that yields an honest calibration on the training stream.
+
+\subsection{Auxiliary observation model}
+The categorical likelihood of the label factorizes over the path, $Z^{\Pr}_{\mathcal C^\ast}=\prod_hP_h$, so observing the class is equivalent to observing ``branch taken'' at each node: $y_h=1$ with $y_h\mid P_h\sim\mathrm{Bernoulli}(P_h)$. The observation is always $1$ because the direction is carried by the sign: $P_h=\Phi(s_hG_hZ_h)$ with $s_h=(-1)^{\mathcal C^\ast_h}$ is, by construction, the probability of the branch the class took. Equivalently one may fix the orientation, $P_h^{+}=\Phi(G_hZ_h)$, and observe $y_h^{+}=1-\mathcal C^\ast_h\in\{0,1\}$; since $\mu_{P_h^{-}}=1-\mu_{P_h^{+}}$ and $\operatorname{Cov}(G_h,P_h^{-})=-\operatorname{Cov}(G_h,P_h^{+})$, the update for $y_h^{+}=0$ coincides term by term with the $s_h$-oriented update for $y_h=1$, so the two conventions are the same computation. In Gaussian form,
+\begin{equation}
+Y_h=P_h+V_h,\qquad V_h\sim\mathcal N(0,\sigma^2_{V_h}),\qquad
+\sigma^2_{V_h}=\mathbb E[P_h(1-P_h)]=\mu_{P_h}(1-\mu_{P_h})-\sigma^2_{P_h}.
+\label{E:obs}
+\end{equation}
+The choice of $\sigma^2_{V_h}$ follows from the law of total variance,
+\begin{equation}
+\operatorname{Var}[Y_h]=\mathbb E\big[\operatorname{Var}[Y_h\mid P_h]\big]+\operatorname{Var}\big[\mathbb E[Y_h\mid P_h]\big]=\mathbb E[P_h(1-P_h)]+\sigma^2_{P_h}=\mu_{P_h}(1-\mu_{P_h}),
+\end{equation}
+the Bernoulli variance. Taking $\sigma^2_{V_h}=\mu_{P_h}(1-\mu_{P_h})$ instead would count $\sigma^2_{P_h}$ twice and damp every update by the factor $\mu_{P_h}(1-\mu_{P_h})/\big(\mu_{P_h}(1-\mu_{P_h})+\sigma^2_{P_h}\big)$. In practice only $\operatorname{Var}[Y_h]=\mu_{P_h}(1-\mu_{P_h})$ is needed, so $\sigma^2_{P_h}$ is never evaluated for the update.
+
+The auxiliary channel is the two-variable joint Gaussian
+\begin{equation}
+\begin{bmatrix}G_h\\ Y_h\end{bmatrix}\sim\mathcal N\!\left(\begin{bmatrix}\mu_{G_h}\\ \mu_{P_h}\end{bmatrix},
+\begin{bmatrix}\sigma^2_{G_h}&\operatorname{Cov}(G_h,P_h)\\ \operatorname{Cov}(G_h,P_h)&\mu_{P_h}(1-\mu_{P_h})\end{bmatrix}\right),
+\end{equation}
+and conditioning on $y_h=1$ gives the gain update
+\begin{equation}
+\boxed{\;
+\mu_{G_h\mid y}=\mu_{G_h}+\frac{\operatorname{Cov}(G_h,P_h)}{\mu_{P_h}},\qquad
+\sigma^2_{G_h\mid y}=\sigma^2_{G_h}-\frac{\operatorname{Cov}(G_h,P_h)^2}{\mu_{P_h}(1-\mu_{P_h})}\;}
+\label{E:update}
+\end{equation}
+with $\mu_{P_h}$ and $\operatorname{Cov}(G_h,P_h)$ from \eqref{E:node}. $Z_h$ enters only through $(\mu_h,\sigma_h^2)$ inside these two quantities; it is not a variable of the joint and receives no update. The bound discussed in \S\ref{S:HSM} is what keeps $\sigma^2_{G_h\mid y}\ge0$.
+
+Three properties. First, the mean in \eqref{E:update} is exact under the Bernoulli likelihood, without any Gaussian assumption on $P_h$: $\mathbb E[G_h\mid y_h=1]=\mathbb E[G_hP_h]/\mathbb E[P_h]=\mu_{G_h}+\operatorname{Cov}(G_h,P_h)/\mu_{P_h}$, and likewise $\mathbb E[G_h\mid y_h=0]=\mu_{G_h}-\operatorname{Cov}(G_h,P_h)/(1-\mu_{P_h})$, which is the same linear form evaluated at $y_h=0$. Second, the variance step is exact \emph{on average over the label}: for a binary $Y_h$, $\mathbb E[G_h\mid Y_h]$ is affine in $Y_h$, so the law of total variance gives $\sigma^2_{G_h}-\operatorname{Cov}(G_h,P_h)^2/\operatorname{Var}[Y_h]=\mathbb E_{y_h}\big[\operatorname{Var}[G_h\mid y_h]\big]$ exactly. What it discards is the label dependence. For $\sigma_h$ of practical size, where $m_h(g)$ saturates in $g$, the exact posterior is narrower after a confirming label and wider after a surprising one ($0.2984$ and $0.3022$ for the worked example of \S\ref{S:ex}, around the recursion's $0.2995$); in the limit $\sigma_h\to0$, where $m_h$ is a plain probit in $g$, the order reverses ($0.2985$ and $0.2975$), the crossover being near $\sigma_h\approx0.15$ for that example. In either case the recursion only ever shrinks, and over a sequence it ends somewhat over-confident (quantified in \S\ref{S:ex}); this is what the variance re-initialization and, for streams, the process noise of \S\ref{S:remarks} compensate. Third, $\operatorname{sign}\operatorname{Cov}(G_h,P_h)=\operatorname{sign}(s_h\mu_h)$: the gain increases when the network already agrees with the branch taken (sharpen) and decreases when it disagrees (soften), which is the behaviour expected from a calibration parameter. With the small-$\sigma_{G_h}$ form $\operatorname{Cov}(G_h,P_h)\approx\sigma^2_{G_h}m_h'(\mu_{G_h})$ of \eqref{E:mg}, the mean step reads $\sigma^2_{G_h}\,\partial_g\log\mathrm{Bern}\big(y_h;m_h(g)\big)$ and the variance step adds the Fisher information: the recursion is online Fisher scoring for the maximum-likelihood gain, i.e.\ temperature scaling fitted online, per node.
+
+\paragraph{Why not observe the product.} One could instead observe $y=1$ on $Z^{\Pr}_{\mathcal C^\ast}$ with $\operatorname{Var}[Y]=\mu_{\Pr}(1-\mu_{\Pr})$. By \eqref{E:class} the resulting mean update of $G_l$ is $\operatorname{Cov}(Z^{\Pr}_{\mathcal C^\ast},G_l)/\mu_{\Pr}=\operatorname{Cov}(P_l,G_l)/\mu_{P_l}$, identical to \eqref{E:update}. The variance updates differ: the product version removes $\operatorname{Cov}(P_l,G_l)^2\,\mu_{\Pr}/\big(\mu_{P_l}^2(1-\mu_{\Pr})\big)$, i.e.\ a fraction $\mu_{\Pr}(1-\mu_{P_l})/\big(\mu_{P_l}(1-\mu_{\Pr})\big)\le1$ of the node version, because the exact posterior factorizes over nodes and the product formulation loses that structure. The node-wise form \eqref{E:update} is thus both simpler and more accurate; the product \eqref{E:class} is only needed to report class probabilities. Likewise, pushing $y=0$ on the other classes adds nothing: at a path node the sibling's ``0'' is the same event as the taken branch's ``1'', and the likelihood of the label does not involve the gains of nodes off the path.
+
+\paragraph{Sharing gains.} Nothing requires one gain per node. A training sample visits exactly one node per level of the tree, so gains shared across all nodes of a level ($\mathtt H$ gains instead of $\mathtt K-1$) receive exactly one update per sample with the algorithm unchanged; this pools the data of deep nodes, which individually see only the samples of their subtree. A single global gain (one parameter, the closest analogue of temperature scaling) is also possible: the $\mathtt H$ updates of a sample are then applied sequentially, each with $\mu_{P_h}$ and $\operatorname{Cov}(G,P_h)$ recomputed from the gain moments left by the previous node. With a validation split of $N_{\text{val}}$ samples a node at the deepest level sees only about $2N_{\text{val}}/\mathtt K$ of them, so per-level sharing is the sensible default; per-node gains are warranted only when the tree is shallow or the validation set large.
+
+\paragraph{Epochs.} Unlike the weights, the gains are not learned across epochs. A gain calibrates the forward-pass predictions of the network \emph{as it currently is}; its posterior is conditional on $\bm\theta$, and the precision accumulated during epoch $e$ describes the calibration of a network that no longer exists once epoch $e+1$ has started. Formally the gain of successive epochs follows a random walk, $G_h^{(e+1)}=G_h^{(e)}+W$, $W\sim\mathcal N(0,\sigma^2_{G,0})$, so the prior at the start of an epoch keeps the previous posterior mean and has variance $\sigma^2_{G_h}+\sigma^2_{G,0}\approx\sigma^2_{G,0}$: keep $\mu_{G_h}$, re-initialize $\sigma^2_{G_h}\leftarrow\sigma^2_{G,0}$ before each validation pass. Since a gain converges within a few hundred samples (Fig.~\ref{F:cal}a) a validation split of a few thousand samples is ample time to re-converge, and because the channel is decoupled from the network the reset costs nothing in training. On a stream whose calibrated gain drifts from $2.0$ to $1.0$ over five epochs (as logits sharpen during training), the recursion without reset ends at $1.19\pm0.04$, confidently wrong; with the reset it ends at $1.00\pm0.05$; a per-sample process noise $q=10^{-4}$ also tracks but with $\sigma_G\approx0.2$, and remains the tool for streams without epochs.
+
+\paragraph{Numerical guards.} When $\Phi$ saturates, $\mu_{P_h}(1-\mu_{P_h})$ underflows and \eqref{E:update} divides by zero; in float32 this happens for a fraction of a percent of the samples once the gain is around $2$. Clip $\mu_{P_h}$ to $[\epsilon,1-\epsilon]$ with $\epsilon\approx10^{-6}$ before \eqref{E:update}, and floor $\sigma^2_{G_h\mid y}$ at zero, since the bound of \S\ref{S:HSM} is not guaranteed for the GMA moments and roundoff can violate it in any case.
+
+\subsection{Algorithm}
+\begin{algorithm}[H]
+\caption{Gain calibration pass, run on the validation split after each epoch (gains initialized once with a weakly informative prior, e.g.\ $\mu_{G_h}=0.3$, $\sigma_{G,0}=1$). The training loop is standard TAGI and is not modified.}
+Keep $\mu_{G_h}$, re-initialize $\sigma^2_{G_h}\leftarrow\sigma^2_{G,0}$ for all gains\;
+Forward pass on the validation split (no network update)\;
+\ForEach{validation sample of class $\mathcal C^\ast$, in sequence}{
+\For{$h=1$ \KwTo $\mathtt H$}{
+Take the forward-pass $(\mu_h,\sigma_h^2)$ of the path unit $h$ and $s_h=(-1)^{\mathcal C^\ast_h}$\;
+Compute $\sigma^2_{S_h}$, $a_h$ by \eqref{E:S}--\eqref{E:a}, then $\mu_{P_h}=\Phi(a_h)$ and $\operatorname{Cov}(G_h,P_h)$ by \eqref{E:node}\;
+Clip $\mu_{P_h}$ to $[\epsilon,1-\epsilon]$; update $(\mu_{G_h},\sigma^2_{G_h})$ with \eqref{E:update}, using $y_h=1$, and floor $\sigma^2_{G_h}$ at zero\;
+}
+}
+Report class probabilities and their variances with \eqref{E:class} using the updated gains\;
+\end{algorithm}
+
+\subsection{Prediction}
+At test time the class probabilities are $\mu_{\Pr}$ from \eqref{E:class} with the current $(\mu_{G_h},\sigma^2_{G_h})$; $\sigma^2_{\Pr}$ quantifies how uncertain the probability itself is, and $\operatorname{Cov}(Z^{\Pr}_{\mathcal C},Z_l)$ is available for any downstream inference on the output layer.
+
+\section{Illustration: two classes, one node}\label{S:ex}
+With $\mathtt K=2$ the tree has a single node, $\mathtt H=1$: one output unit $Z\sim\mathcal N(\mu_Z,\sigma_Z^2)$, one gain $G\sim\mathcal N(\mu_G,\sigma_G^2)$, $s=+1$ for class~1 and $s=-1$ for class~0. The probability of class~1 is $P=\Phi(GZ)$ with moments \eqref{E:node} at $s=1$; class~0 has probability $1-P$.
+
+\paragraph{Node moments.} Take $\mu_Z=0.5$, $\sigma_Z=0.5$ and $G\sim\mathcal N(1.5,0.3^2)$. Equations \eqref{E:cond}--\eqref{E:node} give $\mu_P=0.723$, $\sigma_P=0.214$, $\operatorname{Cov}(Z,P)=0.098$ and $\operatorname{Cov}(G,P)=7.7\times10^{-3}$; a Monte Carlo estimate with $2\times10^6$ samples returns $0.723$, $0.208$, $0.098$ and $7.9\times10^{-3}$. Figure~\ref{F:node}a compares the actual distribution of $P$ with the moment-matched Gaussian: the shape is skewed, but only the mean, variance and covariances enter the linear update. Figure~\ref{F:node}b shows how $\sigma_Z$ flattens $\mu_P$ and creates the spread $\sigma_P$ that the expected-value formulation \eqref{E:tagi} does not report. Figure~\ref{F:node}c shows the two covariances as functions of $\mu_Z$: $\operatorname{Cov}(Z,P)$ is a positive bump centred at the decision boundary, whereas $\operatorname{Cov}(G,P)$ is odd in $\mu_Z$ and changes sign with the side of the boundary on which the prediction lies.
+
+\begin{figure}[h]
+\centering\includegraphics[width=\textwidth]{fig_node.pdf}
+\caption{Node level for $\mathtt K=2$. (a) Distribution of $P=\Phi(GZ)$ and its moment-matched Gaussian for the worked example; the dotted line is $\mu_P$. (b) $\mu_P\pm\sigma_P$ as a function of the forward-pass mean $\mu_Z$ for three values of $\sigma_Z$, at fixed $G=1.5$. (c) $\operatorname{Cov}(Z,P)$ and $\operatorname{Cov}(G,P)/\sigma_G^2$ as functions of $\mu_Z$ for $\sigma_Z=1$, $G\sim\mathcal N(1.5,0.3^2)$.}
+\label{F:node}
+\end{figure}
+
+\paragraph{One observation.} Suppose the label is class~1. The gain update \eqref{E:update} gives $\Delta\mu_G=\operatorname{Cov}(G,P)/\mu_P=+0.0107$ and $\sigma_G\to0.2995$; had the label been class~0, $\Delta\mu_G=-\operatorname{Cov}(G,P)/(1-\mu_P)=-0.0279$. The exact posterior means, computed on a grid over $g$, are $+0.0109$ and $-0.0284$. The asymmetry is the Bernoulli likelihood at work: the prediction favoured class~1 with probability $0.72$, so confirming it is weak evidence and contradicting it is strong evidence. Figure~\ref{F:update}a plots $\Delta\mu_G$ against the forward-pass mean for both labels: a prediction on the correct side of the boundary produces a small step up (sharpen), a prediction on the wrong side a large step down (soften); the two curves are mirror images, as they must be since the two labels are complementary events. Figures~\ref{F:update}b--c show one sample ($\mu_Z=0.8$, $\sigma_Z=0.8$, $G\sim\mathcal N(1,0.3^2)$, $\sigma_V=0.3$) as it is seen by the two channels: in logit space the target $s=+1$ moves and narrows $Z$ (and, through the backward pass, $\bm\theta$); in probability space the label $y_h=1$ is compared with the forward-pass distribution of $P$ and moves $G$ only.
+
+\begin{figure}[h]
+\centering\includegraphics[width=\textwidth]{fig_update.pdf}
+\caption{One training sample. (a) Mean update of the gain as a function of the forward-pass mean $\mu_Z$, for a label equal to class~1 (blue) or class~0 (red); $\sigma_Z=1$, $G\sim\mathcal N(1,0.3^2)$. (b) Logit channel: forward-pass density of $Z$, target $s=+1$, and the density after the logit update. (c) Probability channel for the same sample: distribution of $P=\Phi(GZ)$ obtained from the forward-pass moments, its moment-matched Gaussian, and the label $y_h=1$.}
+\label{F:update}
+\end{figure}
+
+\paragraph{Learning the gain from a validation pass.} A set of $N=3000$ samples, standing for a validation split, is generated as follows. The network's forward-pass moments are $\mu_i\sim\mathcal N(0,1.5^2)$ and $\sigma_i\sim\mathcal U(0.3,1.2)$; the true logit is $z_i\sim\mathcal N(\mu_i,\sigma_i^2)$, i.e.\ the network is calibrated in logit space; the label is $y_i\sim\mathrm{Bernoulli}\big(\Phi(g^\ast z_i)\big)$ with $g^\ast=2$. The calibrated gain is therefore $g^\ast$, and the initial value $\mu_G=0.3$ is badly under-confident. Because $G$ is a scalar, the exact posterior $p(g\mid\text{data})\propto p(g)\prod_i m_i(g)^{y_i}\big(1-m_i(g)\big)^{1-y_i}$ can be tabulated on a grid and used as a reference for the recursion. Figure~\ref{F:cal}a shows the weakly informative prior $\mathcal N(0.3,1^2)$: processed in sequence with Algorithm~1, the recursion reaches $2.02\pm0.14$ after 3000 samples, the exact posterior $2.14\pm0.20$. Over four independent streams the recursion mean stays within $0.15$ of the exact mean while its $\sigma_G$ is $70$--$95\%$ of the exact width, the over-confidence anticipated in \S\ref{S:cal}. Figure~\ref{F:cal}b shows two things to avoid. With a tight prior $\mathcal N(0.3,0.3^2)$ the recursion ends at $1.49\pm0.07$ against an exact posterior of $1.77\pm0.12$: the prior itself is responsible for part of the lag (it places the truth $5.7\sigma$ away, and exact Bayes has not recovered after 3000 samples either), and the Gaussian recursion adds a further $0.3$ with a $\sigma_G$ at $60\%$ of the exact width; hence the recommendation of a wide prior and of a process noise $q$ whose natural target is this gap. Feeding the channel the moments \emph{after} the logit update (\S\ref{S:cal}) makes $G$ grow without bound ($3.7$ and rising), because the channel then sees predictions that already agree with the label. Figure~\ref{F:cal}c is the reliability diagram on $40\,000$ fresh test samples: with $G=0.3$ the probabilities are under-confident (ECE $0.197$, NLL $0.511$); with the learned gain they lie on the diagonal (ECE $0.005$, NLL $0.363$), identical to what the true gain achieves.
+
+\begin{figure}[h]
+\centering\includegraphics[width=\textwidth]{fig_calibration.pdf}
+\caption{Online calibration for $\mathtt K=2$. (a) Prior $\mathcal N(0.3,1^2)$: recursion \eqref{E:update} (blue, with the $\pm2\sigma_G$ band) against the exact posterior of $G$ on the same data (red, mean $\pm2\sigma$); dotted: true gain. (b) Same with the tight prior $\mathcal N(0.3,0.3^2)$; orange dashed: channel fed with post-update moments (wide prior). (c) Reliability diagram on independent test data with the initial and the learned gain.}
+\label{F:cal}
+\end{figure}
+
+\section{Remarks}\label{S:remarks}
+\begin{itemize}
+\item \textbf{Limits.} For $\sigma_h\to0$, $\operatorname{Cov}(Z_h,P_h)\to0$ but $\sigma^2_{P_h}$ and $\operatorname{Cov}(G_h,P_h)$ tend to the finite (and, since $S_h=\mu_hG_h$ is then Gaussian, exact) limits $\operatorname{Var}[\Phi(s_hG_h\mu_h)]$ and $\operatorname{Cov}(G_h,\Phi(s_hG_h\mu_h))$, equal to $1.8\times10^{-3}$ and $0.012$ for $\mu_h=1$ and $G_h\sim\mathcal N(1.5,0.3^2)$: a confident logit still calibrates the gain. For $\mu_h=0$, $\sigma^2_{P_h}=\tfrac14-\tfrac1\pi\arctan b_h$, which tends to $1/4$ as $\sigma_{S_h}\to\infty$ (a fair coin). With a fixed gain $1/\alpha$, $\mu_{\Pr}$ is exactly TAGI's Eq.~\eqref{E:tagi}.
+\item \textbf{Prior on the gain.} Use a weakly informative prior, $\sigma_{G,0}\gtrsim\mu_{G_h}$, both at initialization and at each epoch reset. A tight prior slows down exact Bayes and, on top of that, makes the Gaussian recursion over-confident before the mean has converged (Fig.~\ref{F:cal}b).
+\item \textbf{Adaptivity.} Within a pass $\sigma^2_{G_h}$ only decreases, and the recursion is in any case narrower than the exact posterior (Fig.~\ref{F:cal}a). Across epochs the variance is re-initialized before each validation pass (\S\ref{S:cal}), which is what keeps the gains following the network; a per-sample process noise $q$ does the same for streams without epochs, and the gap to the exact width in \S\ref{S:ex} gives $q$ a target.
+\item \textbf{Positivity.} Nothing enforces $G_h>0$; a sign flip would silently swap the two branches of a node, so $\mu_{G_h}$ should be clipped at a small positive value.
+\item \textbf{Cost.} The calibration pass needs one $\Phi$ and one $\varphi$ per path node per validation sample, as a scalar recursion per node; the recursion is sequential by nature (each step recomputes the moments from the updated gain), which is why it is run sample by sample rather than in batches --- a batch form exists (linear regression of $P_h$ on $G_h$, additive in information form) but adds an approximation that degrades with the batch size, and there is nothing to gain from it here. The prediction path additionally needs $\sigma^2_{P_h}$, computed with the integral form in \eqref{E:cond} and an 8-point Gauss--Legendre rule on $[b_h,1]$: branch-free, positive by construction, accurate to float32 roundoff, and free of Owen's $T$.
+\item \textbf{Verification.} All closed forms were checked against Monte Carlo and against the exact node moments obtained by conditioning on $G_h$ and integrating with a 20-point Gauss--Hermite rule: the node moments \eqref{E:node}, the class moments \eqref{E:class}, and the exact posterior means $\mathbb E[G_hP_h]/\mathbb E[P_h]$ and $\mathbb E[G_h(1-P_h)]/\mathbb E[1-P_h]$ against \eqref{E:update} (\S\ref{S:ex}).
+\end{itemize}
+
+\end{document}

@@ -16,8 +16,12 @@ from triton_tagi.hrc_softmax import (
     get_predicted_labels,
     labels_to_hrc,
     obs_to_class_probs,
+    obs_to_class_probs_probit,
 )
-from triton_tagi.update.observation import compute_innovation_with_indices
+from triton_tagi.update.observation import (
+    compute_innovation_with_indices,
+    compute_probit_innovation_with_indices,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -280,3 +284,88 @@ class TestComputeInnovationWithIndices:
         dm, dS = compute_innovation_with_indices(ma, Sa, y_obs, var_obs, y_idx)
         # Only selected nodes should be non-zero
         assert (dS != 0).sum().item() == hrc.n_obs
+
+
+class TestHierarchicalProbit:
+    def setup_method(self):
+        self.hrc = class_to_obs(10)
+
+    def test_uniform_initial_probabilities_for_cifar10(self):
+        ma = torch.zeros(1, self.hrc.len)
+        Sa = torch.full_like(ma, 0.7)
+        raw = obs_to_class_probs_probit(ma, Sa, self.hrc)
+        torch.testing.assert_close(raw, torch.full_like(raw, 1.0 / 16.0))
+        normalized = raw / raw.sum(dim=1, keepdim=True)
+        torch.testing.assert_close(normalized, torch.full_like(raw, 0.1))
+
+    def test_prediction_uses_fixed_unit_link_scale(self):
+        ma = torch.full((1, self.hrc.len), 0.5)
+        Sa = torch.zeros_like(ma)
+        probabilities = obs_to_class_probs_probit(ma, Sa, self.hrc)
+        q = torch.distributions.Normal(0.0, 1.0).cdf(torch.tensor(0.5))
+        torch.testing.assert_close(probabilities[0, 0], q**self.hrc.n_obs)
+
+        with pytest.raises(TypeError):
+            obs_to_class_probs_probit(ma, Sa, self.hrc, sigma_v=0.3)
+
+    def test_reconstructs_exact_skew_normal_output_moments(self):
+        ma = torch.tensor([[0.4, -0.7]], dtype=torch.float64)
+        Sa = torch.tensor([[0.6, 0.3]], dtype=torch.float64)
+        signs = torch.tensor([[1.0, -1.0]], dtype=torch.float64)
+        var_obs = torch.tensor([[0.25, 1.0]], dtype=torch.float64)
+        indices = torch.tensor([[1, 2]])
+
+        dm, dS = compute_probit_innovation_with_indices(
+            ma, Sa, signs, var_obs, indices
+        )
+        posterior_mean = ma + Sa * dm
+        posterior_variance = Sa + Sa.square() * dS
+
+        r2 = Sa + var_obs
+        r = torch.sqrt(r2)
+        gamma = signs * ma / r
+        normal = torch.distributions.Normal(0.0, 1.0)
+        mills = torch.exp(normal.log_prob(gamma)) / normal.cdf(gamma)
+        expected_mean = ma + signs * Sa / r * mills
+        expected_variance = Sa - Sa.square() / r2 * mills * (mills + gamma)
+
+        torch.testing.assert_close(posterior_mean, expected_mean)
+        torch.testing.assert_close(posterior_variance, expected_variance)
+
+    def test_unvisited_nodes_are_unchanged(self):
+        ma = torch.zeros(1, 3)
+        Sa = torch.ones(1, 3)
+        dm, dS = compute_probit_innovation_with_indices(
+            ma,
+            Sa,
+            torch.tensor([[1.0, -1.0]]),
+            torch.ones(1, 2),
+            torch.tensor([[1, 3]]),
+        )
+        assert dm[0, 1] == 0
+        assert dS[0, 1] == 0
+        assert dm[0, 0] > 0 and dm[0, 2] < 0
+        assert torch.all(dS <= 0)
+
+    def test_inverse_mills_is_finite_in_extreme_left_tail(self):
+        dm, dS = compute_probit_innovation_with_indices(
+            torch.tensor([[-40.0]]),
+            torch.tensor([[0.5]]),
+            torch.ones(1, 1),
+            torch.ones(1, 1),
+            torch.ones(1, 1, dtype=torch.int64),
+        )
+        assert torch.isfinite(dm).all()
+        assert torch.isfinite(dS).all()
+        assert dm.item() > 0
+        assert dS.item() < 0
+
+    def test_invalid_sign_is_rejected(self):
+        with pytest.raises(ValueError, match="signed"):
+            compute_probit_innovation_with_indices(
+                torch.zeros(1, 1),
+                torch.ones(1, 1),
+                torch.zeros(1, 1),
+                torch.ones(1, 1),
+                torch.ones(1, 1, dtype=torch.int64),
+            )

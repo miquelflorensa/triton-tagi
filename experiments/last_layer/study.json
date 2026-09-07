@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "study_id": "cifar_frozen_last_layer_v2_40k10k",
+  "paths": {
+    "data": "data",
+    "artifacts": "runs/last_layer",
+    "corruptions": {
+      "cifar10": "data/CIFAR-10-C",
+      "cifar100": "data/CIFAR-100-C"
+    }
+  },
+  "backbone": {
+    "seed": 2026,
+    "epochs": 200,
+    "batch_size": 128,
+    "evaluation_batch_size": 256,
+    "learning_rate": 0.1,
+    "momentum": 0.9,
+    "weight_decay": 0.0005,
+    "scheduler": "cosine",
+    "post_hoc_calibration": false
+  },
+  "split": {
+    "seed": 2026,
+    "validation_size": 10000
+  },
+  "last_layer": {
+    "batch_size": 256,
+    "diagnostic_cohort_size": 2048,
+    "post_hoc_calibration": false
+  },
+  "fixed_noise": {
+    "heads": [
+      "probit_ovr",
+      "remax_lognormal",
+      "remax_laplace_diag",
+      "hrc"
+    ],
+    "sigma_v": [0.01, 0.03, 0.05, 0.1, 0.3, 1.0],
+    "tied_gains": [0.03, 0.1, 0.3, 1.0],
+    "gain_master": [0.01, 0.03, 0.1, 0.3, 1.0, 3.0]
+  },
+  "unit_probit": {
+    "heads": ["hrc_probit"],
+    "tied_gains": [0.03, 0.1, 0.3, 1.0],
+    "gain_master": [0.01, 0.03, 0.1, 0.3, 1.0, 3.0]
+  },
+  "tagiv": {
+    "heads": ["categorical_tagiv", "hrc_tagiv"],
+    "gain_w": 0.1,
+    "gain_b": 0.1,
+    "v2bar_init": [0.001, 0.01, 0.1],
+    "v2bar_weight_var": 0.000001,
+    "v2bar_bias_var": [0.1, 1.0]
+  },
+  "screen": {
+    "seeds": [0],
+    "epochs": 20,
+    "checkpoints": [0, 1, 2, 5, 10, 20]
+  },
+  "confirmation": {
+    "seeds": [0, 1, 2, 3, 4],
+    "epochs": 200,
+    "checkpoints": [0, 1, 2, 3, 5, 10, 20, 30, 50, 75, 100, 150, 170, 180, 190, 200]
+  },
+  "corruptions": {
+    "canonical_count": 15,
+    "severities": [1, 2, 3, 4, 5],
+    "svhn": true
+  }
+}

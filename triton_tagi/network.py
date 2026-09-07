@@ -30,10 +30,33 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
+from .agci import compute_agci_innovation
 from .base import Layer, LearnableLayer
+from .core_tail import (
+    A_STAR,
+    DEFAULT_NUM_ITERATIONS,
+    compute_core_tail_site_innovation,
+)
+from .gumbel_agci import (
+    compute_gumbel_agci_innovation,
+    compute_logit_site_innovation,
+)
 from .layers.multihead_attention import MultiheadAttentionV2
 from .layers.resblock import ResBlock
-from .update.observation import compute_innovation, compute_innovation_with_indices
+from .logit_tagiv import (
+    LOGIT_VARIANCE_FLOOR,
+    compute_logit_mean_innovation,
+    compute_logit_replicate_innovation,
+    compute_logit_tagiv_innovation,
+)
+from .multinomial_probit import compute_multinomial_probit_adf_innovation
+from .update.observation import (
+    compute_categorical_innovation,
+    compute_hrc_tagiv_innovation,
+    compute_innovation,
+    compute_innovation_with_indices,
+    compute_probit_innovation_with_indices,
+)
 from .update.parameters import get_cap_factor
 
 
@@ -181,7 +204,7 @@ class Sequential:
             y_pred_mu:  Predicted output means before update, shape (B, hrc.len).
             y_pred_var: Predicted output variances before update, shape (B, hrc.len).
         """
-        from .hrc_softmax import labels_to_hrc
+        from .hrc_softmax import labels_to_hrc, labels_to_hrc_mask
 
         batch_size = x_batch.shape[0]
 
@@ -204,7 +227,7 @@ class Sequential:
 
         # 3. Sparse output innovation
         delta_mu, delta_var = compute_innovation_with_indices(
-            ma_flat, Sa_flat, y_obs, var_obs, y_idx
+            ma_flat, Sa_flat, y_obs, var_obs, y_idx, mask=labels_to_hrc_mask(labels, hrc)
         )
 
         if y_pred_mu.dim() == 3:
@@ -221,6 +244,387 @@ class Sequential:
             if isinstance(layer, LearnableLayer):
                 layer.update(cap_factor)
 
+        return y_pred_mu, y_pred_var
+
+    def step_hrc_probit(
+        self,
+        x_batch: Tensor,
+        labels: Tensor,
+        hrc: "HierarchicalSoftmax",
+    ) -> tuple[Tensor, Tensor]:
+        """Update HRC path nodes with exact probit half-space moments.
+
+        The observation model is the half-space event ``s * R_j > 0`` for
+        ``R_j = Z_j + o_j + eps_j`` with ``eps_j ~ N(0, 1)``. With
+        ``d = sqrt(S_j + 1)``, ``gamma = s (mu_j + o_j) / d`` and
+        ``lambda = phi(gamma) / Phi(gamma)``, the exact moment projection gives
+        ``delta_mu = s lambda / d`` and
+        ``delta_S = -lambda (lambda + gamma) / d^2``.
+
+        The likelihood this maximizes is exactly the one
+        :func:`triton_tagi.hrc_probit.hrc_log_probs` reports at inference, and
+        it has no free scale: the unit noise variance fixes the latent unit
+        that ``(mu, S, tau) -> (a mu, a^2 S, a tau)`` would otherwise leave
+        undetermined, and the offsets come from the class prior. There is no
+        ``sigma_v`` and no ``tau`` to choose.
+
+        Args:
+            x_batch: Input mini-batch.
+            labels:  Integer class labels, shape (B,).
+            hrc:     Tree structure; variable-depth paths and branch priors are
+                     honoured through its mask and offsets.
+        """
+
+        from .hrc_softmax import labels_to_hrc, labels_to_hrc_mask
+
+        batch_size = x_batch.shape[0]
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+        pred_shape = y_pred_mu.shape
+        if y_pred_mu.dim() == 3:
+            ma_flat = y_pred_mu.reshape(-1, pred_shape[-1])
+            Sa_flat = y_pred_var.reshape(-1, pred_shape[-1])
+        elif y_pred_mu.dim() == 2:
+            ma_flat = y_pred_mu
+            Sa_flat = y_pred_var
+        else:
+            raise ValueError("HRC probit expects two- or three-dimensional output moments")
+
+        y_obs, y_idx = labels_to_hrc(labels, hrc)
+        mask = labels_to_hrc_mask(labels, hrc)
+        var_obs = torch.ones_like(y_obs)
+        latent_shift = None
+        if hrc.offset is not None:
+            latent_shift = hrc.node_offset(y_obs.device).to(y_obs.dtype)[y_idx.long() - 1]
+        delta_mu, delta_var = compute_probit_innovation_with_indices(
+            ma_flat,
+            Sa_flat,
+            y_obs,
+            var_obs,
+            y_idx,
+            mask=mask,
+            latent_shift=latent_shift,
+        )
+        if y_pred_mu.dim() == 3:
+            delta_mu = delta_mu.reshape(pred_shape)
+            delta_var = delta_var.reshape(pred_shape)
+
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+        cap_factor = get_cap_factor(batch_size)
+        for layer in self.layers:
+            if isinstance(layer, LearnableLayer):
+                layer.update(cap_factor)
+        return y_pred_mu, y_pred_var
+
+    # ------------------------------------------------------------------
+    #  Fixed-noise-free categorical training steps
+    # ------------------------------------------------------------------
+    def step_categorical(
+        self,
+        x_batch: Tensor,
+        labels: Tensor,
+        num_classes: int,
+    ) -> tuple[Tensor, Tensor]:
+        """Update a dense categorical or interleaved categorical TAGI-V head."""
+
+        batch_size = x_batch.shape[0]
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+        delta_mu, delta_var = compute_categorical_innovation(
+            labels, y_pred_mu, y_pred_var, num_classes
+        )
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+        cap_factor = get_cap_factor(batch_size)
+        for layer in self.layers:
+            if isinstance(layer, LearnableLayer):
+                layer.update(cap_factor)
+        return y_pred_mu, y_pred_var
+
+    def step_logit_tagiv(
+        self,
+        x_batch: Tensor,
+        targets: Tensor,
+        variance_floor: float = LOGIT_VARIANCE_FLOOR,
+        update_mean: bool = True,
+    ) -> tuple[Tensor, Tensor]:
+        """Regress continuous logit targets with a learned observation variance.
+
+        The output layer is the interleaved ``2K`` TAGI-V head followed by
+        :class:`~triton_tagi.layers.EvenExp`, so ``targets`` are teacher logits
+        rather than class indices.
+
+        Args:
+            x_batch: Frozen features, shape (B, in_features).
+            targets: Centered teacher logits, shape (B, K).
+            variance_floor: The floor ``s_min2`` added to ``exp(G)``.
+            update_mean: When false the latent stream is frozen and only the
+                variance head learns.
+
+        Returns:
+            y_pred_mu: Output means before the update, shape (B, 2K).
+            y_pred_var: Output variances before the update, shape (B, 2K).
+        """
+
+        batch_size = x_batch.shape[0]
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+        delta_mu, delta_var = compute_logit_tagiv_innovation(
+            targets,
+            y_pred_mu,
+            y_pred_var,
+            variance_floor=variance_floor,
+            update_mean=update_mean,
+        )
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+        cap_factor = get_cap_factor(batch_size)
+        for layer in self.layers:
+            if isinstance(layer, LearnableLayer):
+                layer.update(cap_factor)
+        return y_pred_mu, y_pred_var
+
+    def step_logit_tagiv_mean(
+        self,
+        x_batch: Tensor,
+        targets: Tensor,
+        observation_variance: float,
+    ) -> tuple[Tensor, Tensor]:
+        """Warm up the latent stream of a logit TAGI-V head under fixed noise.
+
+        The variance stream receives zero deltas, so it keeps its prior while
+        the mean converges.
+
+        Args:
+            x_batch: Frozen features, shape (B, in_features).
+            targets: Logit targets, shape (B, K).
+            observation_variance: The fixed ``sigma_v**2``.
+
+        Returns:
+            y_pred_mu: Output means before the update, shape (B, 2K).
+            y_pred_var: Output variances before the update, shape (B, 2K).
+        """
+
+        batch_size = x_batch.shape[0]
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+        delta_mu, delta_var = compute_logit_mean_innovation(
+            targets, y_pred_mu, y_pred_var, observation_variance=observation_variance
+        )
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+        cap_factor = get_cap_factor(batch_size)
+        for layer in self.layers:
+            if isinstance(layer, LearnableLayer):
+                layer.update(cap_factor)
+        return y_pred_mu, y_pred_var
+
+    def step_logit_tagiv_replicates(
+        self,
+        x_batch: Tensor,
+        residual_variance: Tensor,
+        repeats: int,
+        variance_floor: float = LOGIT_VARIANCE_FLOOR,
+    ) -> tuple[Tensor, Tensor]:
+        """Update the variance stream from a replicated sample variance.
+
+        The latent stream receives zero deltas, so this is the second phase of a
+        two-stage fit: the mean is already converged and the variance head reads
+        an observation of ``S`` that never passes through it.
+
+        Args:
+            x_batch: Frozen features, shape (B, in_features).
+            residual_variance: Unbiased sample variance over repeats, shape (B, K).
+            repeats: The replicate count ``M``, at least two.
+            variance_floor: The floor ``s_min2``.
+
+        Returns:
+            y_pred_mu: Output means before the update, shape (B, 2K).
+            y_pred_var: Output variances before the update, shape (B, 2K).
+        """
+
+        batch_size = x_batch.shape[0]
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+        delta_mu, delta_var = compute_logit_replicate_innovation(
+            residual_variance,
+            y_pred_mu,
+            y_pred_var,
+            repeats=repeats,
+            variance_floor=variance_floor,
+        )
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+        cap_factor = get_cap_factor(batch_size)
+        for layer in self.layers:
+            if isinstance(layer, LearnableLayer):
+                layer.update(cap_factor)
+        return y_pred_mu, y_pred_var
+
+    def step_multinomial_probit_adf(
+        self,
+        x_batch: Tensor,
+        labels: Tensor,
+        probit_tau2: float = 1.0,
+    ) -> tuple[Tensor, Tensor]:
+        """Update dense class utilities with multinomial-probit ADF moments."""
+
+        batch_size = x_batch.shape[0]
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+        if y_pred_mu.dim() != 2:
+            raise ValueError("multinomial-probit ADF currently expects two-dimensional outputs")
+        delta_mu, delta_var = compute_multinomial_probit_adf_innovation(
+            labels,
+            y_pred_mu,
+            y_pred_var,
+            probit_tau2=probit_tau2,
+        )
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+        cap_factor = get_cap_factor(batch_size)
+        for layer in self.layers:
+            if isinstance(layer, LearnableLayer):
+                layer.update(cap_factor)
+        return y_pred_mu, y_pred_var
+
+    def step_agci(
+        self,
+        x_batch: Tensor,
+        labels: Tensor,
+        tau: float = 1.0,
+        num_quad: int = 48,
+    ) -> tuple[Tensor, Tensor]:
+        """Update utilities with observed-event fixed-noise AGCI moments."""
+
+        batch_size = x_batch.shape[0]
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+        if y_pred_mu.dim() != 2:
+            raise ValueError("AGCI currently expects two-dimensional outputs")
+        delta_mu, delta_var = compute_agci_innovation(
+            labels,
+            y_pred_mu,
+            y_pred_var,
+            tau=tau,
+            num_quad=num_quad,
+        )
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+        # ``cap_factor_override`` lets a caller bypass the cuTAGI cap heuristic;
+        # a near-zero value makes the cap threshold sqrt(S)/cap unreachable.
+        override = getattr(self, "cap_factor_override", None)
+        cap_factor = override if override is not None else get_cap_factor(batch_size)
+        for layer in self.layers:
+            if isinstance(layer, LearnableLayer):
+                layer.update(cap_factor)
+        return y_pred_mu, y_pred_var
+
+    def step_logit_site(
+        self,
+        x_batch: Tensor,
+        labels: Tensor,
+        *,
+        beta: float = 1.0,
+    ) -> tuple[Tensor, Tensor]:
+        """Update utilities with the minimal prior-mean logit site."""
+
+        batch_size = x_batch.shape[0]
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+        if y_pred_mu.dim() != 2:
+            raise ValueError("logit site currently expects two-dimensional outputs")
+        delta_mu, delta_var = compute_logit_site_innovation(
+            labels, y_pred_mu, y_pred_var, beta=beta
+        )
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+        override = getattr(self, "cap_factor_override", None)
+        cap_factor = override if override is not None else get_cap_factor(batch_size)
+        for layer in self.layers:
+            if isinstance(layer, LearnableLayer):
+                layer.update(cap_factor)
+        return y_pred_mu, y_pred_var
+
+    def step_core_tail(
+        self,
+        x_batch: Tensor,
+        labels: Tensor,
+        *,
+        beta: float = 1.0,
+        a_star: float = A_STAR,
+        num_iterations: int = DEFAULT_NUM_ITERATIONS,
+    ) -> tuple[Tensor, Tensor]:
+        """Update utilities with the Core-Tail categorical site."""
+
+        batch_size = x_batch.shape[0]
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+        if y_pred_mu.dim() != 2:
+            raise ValueError("the Core-Tail site expects two-dimensional outputs")
+        delta_mu, delta_var = compute_core_tail_site_innovation(
+            labels,
+            y_pred_mu,
+            y_pred_var,
+            beta=beta,
+            a_star=a_star,
+            num_iterations=num_iterations,
+        )
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+        override = getattr(self, "cap_factor_override", None)
+        cap_factor = override if override is not None else get_cap_factor(batch_size)
+        for layer in self.layers:
+            if isinstance(layer, LearnableLayer):
+                layer.update(cap_factor)
+        return y_pred_mu, y_pred_var
+
+    def step_gumbel_agci(
+        self,
+        x_batch: Tensor,
+        labels: Tensor,
+        *,
+        beta: float = 1.0,
+        num_samples: int = 32,
+        seed: int = 0,
+    ) -> tuple[Tensor, Tensor]:
+        """Update utilities with Gumbel-noise argmax-event AGCI moments."""
+
+        batch_size = x_batch.shape[0]
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+        if y_pred_mu.dim() != 2:
+            raise ValueError("Gumbel AGCI currently expects two-dimensional outputs")
+        delta_mu, delta_var = compute_gumbel_agci_innovation(
+            labels,
+            y_pred_mu,
+            y_pred_var,
+            beta=beta,
+            num_samples=num_samples,
+            seed=seed,
+        )
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+        override = getattr(self, "cap_factor_override", None)
+        cap_factor = override if override is not None else get_cap_factor(batch_size)
+        for layer in self.layers:
+            if isinstance(layer, LearnableLayer):
+                layer.update(cap_factor)
+        return y_pred_mu, y_pred_var
+
+    def step_hrc_tagiv(
+        self,
+        x_batch: Tensor,
+        labels: Tensor,
+        hrc: "HierarchicalSoftmax",
+    ) -> tuple[Tensor, Tensor]:
+        """Update an interleaved TAGI-V head at sparse HRC path nodes."""
+
+        from .hrc_softmax import labels_to_hrc
+
+        batch_size = x_batch.shape[0]
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+        if y_pred_mu.dim() != 2:
+            raise ValueError("HRC TAGI-V currently expects two-dimensional last-layer output")
+        y_obs, y_idx = labels_to_hrc(labels, hrc)
+        delta_mu, delta_var = compute_hrc_tagiv_innovation(y_pred_mu, y_pred_var, y_obs, y_idx)
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+        cap_factor = get_cap_factor(batch_size)
+        for layer in self.layers:
+            if isinstance(layer, LearnableLayer):
+                layer.update(cap_factor)
         return y_pred_mu, y_pred_var
 
     # ------------------------------------------------------------------

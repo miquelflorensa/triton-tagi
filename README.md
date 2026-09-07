@@ -122,6 +122,8 @@ reading it top-to-bottom in an evening is a goal, not an accident.
 - `network.py`: `Sequential` (forward / step / train / eval).
 - `param_init.py`: He / Xavier / Gaussian init.
 - `hrc_softmax.py`: hierarchical softmax output for many-class classification.
+- `hrc_probit.py`: full K-leaf trees and the unit-probit class likelihood,
+  plus the scale ablations it is compared against.
 - `checkpoint.py`: `RunDir` (run-directory manager) and `load_model`.
 - `kernels/common.py`: fused Triton kernels for Linear / Conv2D / BN.
 - `kernels/attention.py`: fused Triton kernels for `MultiheadAttentionV2`
@@ -224,3 +226,210 @@ and break parity.
 - Alric, L. (2024). Closed-form MixtureReLU moments.
 - cuTAGI: [github.com/lhnguyen102/cuTAGI](https://github.com/lhnguyen102/cuTAGI).
 - Triton: [triton-lang.org](https://triton-lang.org/).
+
+## Frozen PyTorch backbone + TAGI heads
+
+Install the example dependency, train a conventional deterministic model, then
+compare its softmax probabilities with TAGI Remax and HRC heads trained on
+frozen penultimate features or logits:
+
+```bash
+pip install -e ".[examples,vis]"
+python examples/train_cifar10_resnet18_torch.py \
+  --output runs/deterministic_cifar10_resnet18.pt
+python examples/compare_cifar10_tagi_heads.py \
+  --checkpoint runs/deterministic_cifar10_resnet18.pt
+```
+
+A fast end-to-end check uses `--smoke` on both commands. Laplace-Remax is
+available without changing the default cuTAGI-parity lognormal comparison:
+
+```bash
+python examples/compare_cifar10_tagi_heads.py \
+  --checkpoint runs/deterministic_cifar10_resnet18.pt \
+  --remax-approximation laplace --remax-jacobian diag
+```
+
+The comparison writes accuracy, 15-bin ECE, multiclass NLL, Brier score, and
+SVHN OOD AUROC/AUPR/FPR95 using predictive entropy and negative maximum
+probability. It does not fit temperature scaling or any other post-hoc
+calibration. For another PyTorch architecture, construct it explicitly, load
+it with `load_torch_checkpoint`, and give `FrozenTorchBackbone` a callback that
+returns `(features, logits)`.
+The reusable API accepts cached feature tensors directly:
+
+```python
+from triton_tagi import TAGILastLayerClassifier
+
+head = TAGILastLayerClassifier(
+    features.shape[1],
+    100,
+    head="remax_laplace_diag",
+    sigma_v=0.05,
+    gain_w=0.1,
+    gain_b=0.1,
+)
+history = head.fit(
+    features,
+    labels,
+    epochs=20,
+    validation=(validation_features, validation_labels),
+)
+prediction = head.predict(test_features)
+```
+
+Choose `probit_ovr`, `remax_lognormal`, `remax_laplace_diag`, `hrc`,
+`hrc_probit`, `multinomial_probit`, `agci`, `agci_remax`, `gumbel_agci`,
+`logit_site`, `ct_agci`, `categorical_tagiv`, `hrc_tagiv`, or `logit_tagiv`.
+The
+`hrc_probit` head fixes its latent link variance at one and does not accept
+`sigma_v`. TAGI-V heads omit
+`sigma_v` because they learn their observation-variance channel.
+
+### Hierarchical probit
+
+`head="hrc_probit"` is a hierarchical classifier with no free scale. Each
+decision node of a full K-leaf tree carries a latent variable with unit probit
+noise,
+
+    Z_j | x, D ~ N(mu_j, S_j),   R_j = Z_j + o_j + eps_j,   eps_j ~ N(0, 1),
+
+so the class probability is
+
+    p(c | x, D) = prod_{j in path(c)} Phi( s_cj (mu_j + o_j) / sqrt(S_j + 1) ),
+
+and these sum to one without normalization. Training uses the matching probit
+moment update: with `d = sqrt(S_j + 1)`, `gamma = s_cj (mu_j + o_j) / d` and
+`lambda = phi(gamma) / Phi(gamma)`, the innovations are `delta_mu = s lambda /
+d` and `delta_S = -lambda (lambda + gamma) / d^2`. That is the whole
+observation model.
+
+Nothing in it is tuned. The unit noise variance fixes the latent unit that
+`(mu, S, tau) -> (a mu, a^2 S, a tau)` would otherwise leave undetermined,
+exactly as standard probit regression does. The branch offsets are
+deterministic, `o_j = Phi^-1(pi_j)` for the left-subtree share `pi_j` of the
+node's prior mass, which is zero at every node when K is a power of two. So the
+head takes no `sigma_v`, no temperature, and no calibration step:
+
+```python
+head = TAGILastLayerClassifier(features.shape[1], 10, head="hrc_probit")
+head.fit(train_features, train_labels, epochs=20)
+prediction = head.predict(test_features)
+```
+
+`class_to_obs_full(K)` builds the tree: exactly K leaves and K - 1 decision
+nodes, so CIFAR-10 needs nine outputs. The older `class_to_obs(K)` pads K
+classes into 2^ceil(log2 K) leaves and discards the rest, so for K = 10 its ten
+leaf products do not sum to one and a categorical normalizer is required before
+any proper score is computed.
+
+Evaluation is ordinary categorical cross-entropy, which makes the comparison
+with a softmax classifier one-to-one in nats. `triton_tagi.hrc_probit` exposes
+`hrc_log_probs`, `hrc_negative_log_likelihood`, and
+`hrc_log_partition_deviation` for the `max_n |sum_c p_nc - 1|` invariant.
+
+The padded tree (`hrc_tree="padded"`), the Gaussian +/-1 update (`head="hrc"`),
+a fitted latent scale (`fit_hrc_log_tau`, `calibrate_hrc_log_tau`), and its
+Laplace posterior (`fit_hrc_log_tau_laplace`) are research ablations against
+that model, not part of it.
+`experiments/last_layer/run_hrc_calibration.py` runs the main comparison and
+those ablations on frozen CIFAR-10 features.
+
+The `logit_tagiv` head is the only one that trains on continuous targets. It
+regresses a teacher's logits over frozen features and learns the observation
+variance of that regression, so it takes `targets` rather than `labels`:
+
+```python
+from triton_tagi import TAGILastLayerClassifier, prepare_logit_targets
+
+targets, scale = prepare_logit_targets(teacher_logits)
+head = TAGILastLayerClassifier(
+    features.shape[1], 10, head="logit_tagiv", logit_scale=scale
+)
+head.fit(features, targets=targets, epochs=5)
+head.calibrate(validation_features, validation_labels, mode="joint")
+prediction = head.predict(test_features)
+```
+
+When repeated observations of the same input are available, prefer the
+two-phase fit: `fit_mean` under a fixed observation variance, then
+`reset_variance_head`, then `fit_variance` driven by the replicated sample
+variance. A cold start learns its mean and its variance from the same first
+step, so an early residual on a large-magnitude target is stored as noise and
+then throttles that channel's own mean update through the `1 / (v_Z + mu_S)`
+gain. The replicate-aware update observes the noise without passing through the
+mean head at all, and `fit_variance(weight_shrinkage=...)` bounds how much
+across-input spread the log-variance develops, which is the remaining error once
+the contamination is gone.
+
+Its output layer is the interleaved `2K` TAGI-V head followed by `EvenExp`, so
+the observation variance is `s_min2 + exp(G)` with `G` Gaussian and
+unconstrained. The exponential is what makes both the forward moments and the
+cross-covariance `Cov(G, S) = v_G mu_X` analytic. Training conditions the
+latent logit and the residual on the observed teacher logit, projects the
+posterior residual square onto the AGVI moments of that variance, and maps the
+result back through the exponential. `calibrate` then fits the post-hoc
+temperature and the aleatoric multiplier `alpha` by validation NLL on shared
+Sobol draws; `logit_tagiv_uncertainty` splits the predictive entropy into its
+aleatoric and epistemic parts. The variance prior must not collapse:
+`logit_variance_cv` sets the prior coefficient of variation of `exp(G)`, and a
+zero would make the AGVI gain zero and freeze the head.
+
+The `multinomial_probit` head instead uses `probit_tau2=1.0` for canonical
+probit utility noise or `probit_tau2=0.0` for an epistemic-only model. Its
+predictions and training update both use the TAGI output variances.
+
+The `agci` head conditions jointly on the observed noisy-utility argmax event.
+It uses fixed `agci_tau=1.0` by default and shifted one-dimensional Gaussian
+quadrature to obtain the class-event moments for diagonal TAGI outputs before
+the ordinary TAGI backward pass.
+`agci_remax` uses the same AGCI training update but maps the resulting Gaussian
+utilities to predictive probabilities and output variances with ReMax. It
+centers each utility vector first so the map remains invariant to the shared
+offset that an argmax likelihood cannot identify.
+
+`gumbel_agci` swaps the Gaussian decision noise for Gumbel noise, which makes
+the argmax event an exact multinomial logit and gives a class probability that
+decays linearly rather than quadratically in the utility margin. `logit_site`
+is its `S -> 0` limit, taking the probabilities from the prior means and
+applying an ordinary Gaussian site.
+
+`ct_agci` replaces softmax in that site with the Core-Tail link, the convex
+choice model whose regularizer is Shannon negative entropy plus an interior
+correction `-a* p^2 (1 - p)^2` that vanishes at `p = 0` and `p = 1`. It
+therefore keeps the exact softmax tail and has the variance-matched probit
+slope at a tie. The coefficient
+`a* = (pi sqrt(2 pi) / sqrt(3) - 4) / 2 = 0.2732603854486113` is derived from
+that slope match rather than fitted, and `core_tail_a_star=0.0` reduces the
+head exactly to `logit_site`. Score and diagonal Fisher curvature are both
+`O(C)` and exact.
+
+Open-set detection requires a separate feature-support hypothesis; a
+closed-set argmax likelihood cannot represent “none of the above.” The
+`BayesianFeatureSupportGate` fits objective-Bayes Student-t posterior
+predictives to labeled ID features and combines their domain evidence with any
+conditional class probabilities:
+
+```python
+from triton_tagi import BayesianFeatureSupportGate
+
+gate = BayesianFeatureSupportGate.fit(train_features, train_labels)
+open_set = gate.predict(test_features, prediction.probabilities)
+# open_set.probabilities has K known-class columns plus one OOD column.
+```
+
+The gate uses no OOD fitting data or statistical tuning parameters. Its
+`log_bayes_factor` should be preferred as a ranking score in high dimensions,
+where the corresponding posterior probability can saturate numerically and
+statistically.
+
+
+### Reproducible CIFAR-10/CIFAR-100 last-layer study
+
+The staged study in [experiments/last_layer](experiments/last_layer/README.md)
+trains one pinned deterministic ResNet-18 per dataset, caches frozen features for
+clean CIFAR, all 15 canonical CIFAR-C corruptions at severities 1-5, and SVHN,
+then screens and confirms Probit OVR, lognormal Remax, diagonal Laplace-Remax,
+HRC, dense categorical TAGI-V, and hierarchical TAGI-V heads. It records
+calibration, proper scoring, selective prediction, OOD detection, and
+long-horizon epistemic convergence without post-hoc scaling.

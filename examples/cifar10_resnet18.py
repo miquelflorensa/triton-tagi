@@ -7,7 +7,7 @@ Architecture (CIFAR-10 adaptation — 3×3 stem, no max-pool):
     Stage 2: ResBlock(64,  128, s=2) + ResBlock(128, 128) [16×16]
     Stage 3: ResBlock(128, 256, s=2) + ResBlock(256, 256) [8×8]
     Stage 4: ResBlock(256, 512, s=2) + ResBlock(512, 512) [4×4]
-    Head:    AvgPool(4) → Flatten → FC(512→10) → Remax
+    Head:    AvgPool(4) → Flatten → FC(512→10) → Remax or AGCI
 
 Each ResBlock: Conv(3×3,s) → ReLU → BN → Conv(3×3) → ReLU → BN + shortcut.
 Projection shortcut (stride>1 or ch mismatch): Conv(2×2, s=2) → ReLU → BN.
@@ -17,6 +17,7 @@ Matches cuTAGI's exponential_scheduler (default: 1.0 → 0.3 at ×0.95/ep).
 
 Usage:
     python examples/cifar10_resnet18.py
+    python examples/cifar10_resnet18.py --head agci --agci_tau 1
     python examples/cifar10_resnet18.py --n_epochs 30
     python examples/cifar10_resnet18.py --data_dir /path/to/data --no_augment
     python examples/cifar10_resnet18.py --help
@@ -43,6 +44,7 @@ from triton_tagi import (
     Remax,
     ResBlock,
     Sequential,
+    agci_predictive_probs,
 )
 from triton_tagi.checkpoint import RunDir
 
@@ -110,15 +112,18 @@ def evaluate(
     net: Sequential,
     x_test: torch.Tensor,
     y_labels: torch.Tensor,
+    head: str = "remax",
+    agci_tau: float = 1.0,
+    agci_num_quad: int = 48,
     batch_size: int = 256,
     n_bins: int = 15,
 ) -> dict[str, float]:
     """Return a dict of test metrics.
 
-    Keys: ``test_acc``, ``mean_conf``, ``ece``, ``nll``, ``brier`` and the
-    Remax output predictive-variance stats ``out_var_max`` / ``out_var_mean`` /
-    ``out_var_p99``. NLL and Brier treat the Remax mean output ``mu`` as the
-    predictive class-probability vector.
+    Keys: ``test_acc``, ``mean_conf``, ``ece``, ``nll``, ``brier`` and output
+    predictive-variance stats ``out_var_max`` / ``out_var_mean`` /
+    ``out_var_p99``. NLL and Brier use the selected head's predictive class
+    probabilities.
     """
     net.eval()
     correct = 0
@@ -130,23 +135,32 @@ def evaluate(
     with torch.no_grad():
         for i in range(0, len(x_test), batch_size):
             mu, var = net.forward(x_test[i : i + batch_size])
+            probabilities = (
+                agci_predictive_probs(
+                    mu, var, tau=agci_tau, num_quad=agci_num_quad
+                )
+                if head == "agci"
+                else mu
+            )
             yb = y_labels[i : i + batch_size]
-            conf, pred = mu.max(dim=1)
+            conf, pred = probabilities.max(dim=1)
             hit = pred == yb
             correct += hit.sum().item()
             conf_chunks.append(conf.detach())
             hit_chunks.append(hit.detach().to(conf.dtype))
 
-            # NLL: -log p[true]. mu is the predictive probability vector; clamp
-            # for numerical safety since the moment approximation can dip <=0.
-            p = mu.clamp(min=1e-12)
+            # NLL: -log p[true]. Clamp for numerical safety since a moment
+            # approximation can dip to zero.
+            p = probabilities.clamp(min=1e-12)
             p_true = p.gather(1, yb.view(-1, 1)).squeeze(1)
             nll_chunks.append((-p_true.log()).detach())
 
             # Multi-class Brier: sum_k (p_k - onehot_k)^2, averaged over samples.
-            onehot = torch.zeros_like(mu)
+            onehot = torch.zeros_like(probabilities)
             onehot.scatter_(1, yb.view(-1, 1), 1.0)
-            brier_chunks.append(((mu - onehot) ** 2).sum(dim=1).detach())
+            brier_chunks.append(
+                ((probabilities - onehot) ** 2).sum(dim=1).detach()
+            )
 
             out_var_chunks.append(var.detach().reshape(-1))
 
@@ -240,7 +254,7 @@ def make_sigma_v_schedule(start, end, decay_epochs, shape, n_epochs):
 def train(
     net: Sequential,
     x_train: torch.Tensor,
-    y_train_oh: torch.Tensor,
+    y_train_targets: torch.Tensor,
     x_test: torch.Tensor,
     y_test_labels: torch.Tensor,
     n_epochs: int,
@@ -250,10 +264,14 @@ def train(
     device: torch.device,
     run: RunDir,
     config: dict,
+    head: str = "remax",
+    agci_tau: float = 1.0,
+    agci_num_quad: int = 48,
 ) -> float:
     """Training loop with optional GPU augmentation. Returns best test accuracy."""
+    noise_label = "τ" if head == "agci" else "σ_v"
     header = (
-        f"\n  {'Epoch':>5}  {'σ_v':>6}  {'Acc':>7}  {'Conf':>6}  {'ECE':>6}  {'NLL':>6}"
+        f"\n  {'Epoch':>5}  {noise_label:>6}  {'Acc':>7}  {'Conf':>6}  {'ECE':>6}  {'NLL':>6}"
         f"  {'Brier':>6}  {'oVarMax':>8}  {'lVarMax':>9}  {'@L':>3}  {'Time':>7}"
     )
     print(header)
@@ -267,21 +285,36 @@ def train(
 
     for epoch in range(1, n_epochs + 1):
         t0 = time.perf_counter()
-        sv = sigma_v_fn(epoch)
+        sv = agci_tau if head == "agci" else sigma_v_fn(epoch)
         perm = torch.randperm(x_train.size(0), device=device)
-        x_s, y_s = x_train[perm], y_train_oh[perm]
+        x_s, y_s = x_train[perm], y_train_targets[perm]
 
         for i in range(0, len(x_s), batch_size):
             xb = x_s[i : i + batch_size]
             if augment:
                 xb = gpu_augment(xb)
-            net.step(xb, y_s[i : i + batch_size], sv)
+            if head == "agci":
+                net.step_agci(
+                    xb,
+                    y_s[i : i + batch_size],
+                    tau=agci_tau,
+                    num_quad=agci_num_quad,
+                )
+            else:
+                net.step(xb, y_s[i : i + batch_size], sv)
 
         if device.type == "cuda":
             torch.cuda.synchronize()
         wall = time.perf_counter() - t0
 
-        m = evaluate(net, x_test, y_test_labels)
+        m = evaluate(
+            net,
+            x_test,
+            y_test_labels,
+            head=head,
+            agci_tau=agci_tau,
+            agci_num_quad=agci_num_quad,
+        )
         per_layer, layer_var_max, layer_var_max_idx = layer_variance_stats(net, var_probe)
         acc = m["test_acc"]
         best_acc = max(best_acc, acc)
@@ -291,6 +324,7 @@ def train(
             f"  {layer_var_max:9.2e}  {layer_var_max_idx:3d}  {wall:6.2f}s",
             flush=True,
         )
+        noise_metric = {"agci_tau": sv} if head == "agci" else {"sigma_v": sv}
         run.append_metrics(
             epoch,
             test_acc=acc,
@@ -303,8 +337,8 @@ def train(
             out_var_p99=m["out_var_p99"],
             layer_var_max=layer_var_max,
             layer_var_max_idx=layer_var_max_idx,
-            sigma_v=sv,
             wall_s=wall,
+            **noise_metric,
         )
         with open(layer_var_log, "a") as f:
             f.write(json.dumps({"epoch": epoch, "layers": per_layer}) + "\n")
@@ -362,6 +396,9 @@ def main(
     sigma_v_schedule: str = "linear",
     gain_w: float = 0.1,
     gain_b: float = 0.1,
+    head: str = "remax",
+    agci_tau: float = 1.0,
+    agci_num_quad: int = 48,
     remax_approximation: str = "lognormal",
     remax_jacobian: str = "diag",
     remax_num_quad: int = 48,
@@ -375,6 +412,9 @@ def main(
 
     Args:
         sigma_v: Observation noise (fixed).
+        head: "remax" for the standard probability-space observation update or
+            "agci" for the noisy-argmax class-event update on raw utilities.
+        agci_tau: Fixed standard deviation of each AGCI utility's observation noise.
         remax_approximation: "lognormal" for cuTAGI parity or "laplace".
         remax_jacobian: "diag" or "full" for Laplace-Remax backward.
         augment: Apply random flip + crop augmentation each batch.
@@ -384,15 +424,21 @@ def main(
 
     print("=" * 60)
     print("  CIFAR-10 Classification — ResNet-18 — triton-tagi")
-    print("  Stem+4 stages(64→128→256→512)+GAP → FC(512→10) → Remax")
-    print(f"  Remax approximation: {remax_approximation} ({remax_jacobian})")
+    head_label = "AGCI" if head == "agci" else "Remax"
+    print(f"  Stem+4 stages(64→128→256→512)+GAP → FC(512→10) → {head_label}")
+    if head == "agci":
+        print(f"  AGCI: tau={agci_tau:g}, quadrature={agci_num_quad}")
+    else:
+        print(f"  Remax approximation: {remax_approximation} ({remax_jacobian})")
     print("=" * 60)
     if device == "cuda":
         print(f"  GPU : {torch.cuda.get_device_name(0)}")
 
     # ── Data ──
     print(f"\n  Loading CIFAR-10 from '{data_dir}'...", flush=True)
-    x_train, y_train_oh, _, x_test, y_test_labels = load_cifar10(data_dir, dev)
+    x_train, y_train_oh, y_train_labels, x_test, y_test_labels = load_cifar10(
+        data_dir, dev
+    )
     print(f"  Train: {x_train.shape[0]:,}  |  Test: {x_test.shape[0]:,}")
     print(f"  Input shape: {tuple(x_train.shape[1:])}")
 
@@ -410,6 +456,9 @@ def main(
         "sigma_v_schedule": sigma_v_schedule,
         "gain_w": gain_w,
         "gain_b": gain_b,
+        "head": head,
+        "agci_tau": agci_tau,
+        "agci_num_quad": agci_num_quad,
         "remax_approximation": remax_approximation,
         "remax_jacobian": remax_jacobian,
         "remax_num_quad": remax_num_quad,
@@ -421,7 +470,14 @@ def main(
     }
 
     # ── RunDir ──
-    arch_tag = "resnet18" if remax_approximation == "lognormal" else f"resnet18_{remax_approximation}_{remax_jacobian}"
+    if head == "agci":
+        arch_tag = f"resnet18_agci_tau{agci_tau:g}"
+    else:
+        arch_tag = (
+            "resnet18"
+            if remax_approximation == "lognormal"
+            else f"resnet18_{remax_approximation}_{remax_jacobian}"
+        )
     run = RunDir("cifar10", arch_tag, "tagi")
     run.save_config(config)
     print(f"  Run directory: {run.path}")
@@ -429,36 +485,37 @@ def main(
     # ── Network ──
     kw = {"device": dev, "gain_w": gain_w, "gain_b": gain_b}
 
-    net = Sequential(
-        [
-            # Stem: 32×32
-            Conv2D(3, 64, 3, stride=1, padding=1, **kw),
-            ReLU(),
-            BatchNorm2D(64, **kw),
-            # Stage 1: 32×32
-            ResBlock(64, 64, stride=1, **kw),
-            ResBlock(64, 64, stride=1, **kw),
-            # Stage 2: 32→16
-            ResBlock(64, 128, stride=2, **kw),
-            ResBlock(128, 128, stride=1, **kw),
-            # Stage 3: 16→8
-            ResBlock(128, 256, stride=2, **kw),
-            ResBlock(256, 256, stride=1, **kw),
-            # Stage 4: 8→4
-            ResBlock(256, 512, stride=2, **kw),
-            ResBlock(512, 512, stride=1, **kw),
-            # Head
-            AvgPool2D(4),           # 4×4 → 1×1
-            Flatten(),              # 512
-            Linear(512, 10, **kw),
+    layers = [
+        # Stem: 32×32
+        Conv2D(3, 64, 3, stride=1, padding=1, **kw),
+        ReLU(),
+        BatchNorm2D(64, **kw),
+        # Stage 1: 32×32
+        ResBlock(64, 64, stride=1, **kw),
+        ResBlock(64, 64, stride=1, **kw),
+        # Stage 2: 32→16
+        ResBlock(64, 128, stride=2, **kw),
+        ResBlock(128, 128, stride=1, **kw),
+        # Stage 3: 16→8
+        ResBlock(128, 256, stride=2, **kw),
+        ResBlock(256, 256, stride=1, **kw),
+        # Stage 4: 8→4
+        ResBlock(256, 512, stride=2, **kw),
+        ResBlock(512, 512, stride=1, **kw),
+        # Head
+        AvgPool2D(4),  # 4×4 → 1×1
+        Flatten(),  # 512
+        Linear(512, 10, **kw),
+    ]
+    if head == "remax":
+        layers.append(
             Remax(
                 approximation=remax_approximation,
                 jacobian=remax_jacobian,
                 num_quad=remax_num_quad,
-            ),
-        ],
-        device=dev,
-    )
+            )
+        )
+    net = Sequential(layers, device=dev)
     print(f"\n{net}")
     print(f"  Parameters: {net.num_parameters():,}")
     sigma_v_fn = make_sigma_v_schedule(
@@ -468,15 +525,29 @@ def main(
         f"{sigma_v}" if sigma_v_end is None
         else f"{sigma_v}→{sigma_v_end} by ep{min(sigma_v_decay_epochs, n_epochs)} ({sigma_v_schedule})"
     )
+    noise_desc = f"AGCI tau: {agci_tau:g}" if head == "agci" else f"σ_v: {sv_desc}"
     print(
-        f"\n  Epochs: {n_epochs}  |  Batch: {batch_size}  |  σ_v: {sv_desc}"
-        f"  |  augment: {augment}  |  remax: {remax_approximation}/{remax_jacobian}"
+        f"\n  Epochs: {n_epochs}  |  Batch: {batch_size}  |  {noise_desc}"
+        f"  |  augment: {augment}  |  head: {head_label.lower()}"
     )
 
     # ── Train ──
     best_acc = train(
-        net, x_train, y_train_oh, x_test, y_test_labels,
-        n_epochs, batch_size, sigma_v_fn, augment, dev, run, config,
+        net,
+        x_train,
+        y_train_labels if head == "agci" else y_train_oh,
+        x_test,
+        y_test_labels,
+        n_epochs,
+        batch_size,
+        sigma_v_fn,
+        augment,
+        dev,
+        run,
+        config,
+        head=head,
+        agci_tau=agci_tau,
+        agci_num_quad=agci_num_quad,
     )
 
     # ── Figure ──
@@ -501,6 +572,9 @@ if __name__ == "__main__":
                         default="linear", help="Annealing shape for sigma_v.")
     parser.add_argument("--gain_w", type=float, default=0.1)
     parser.add_argument("--gain_b", type=float, default=0.1)
+    parser.add_argument("--head", choices=["remax", "agci"], default="remax")
+    parser.add_argument("--agci_tau", type=float, default=1.0)
+    parser.add_argument("--agci_num_quad", type=int, default=48)
     parser.add_argument(
         "--remax_approximation",
         choices=["lognormal", "laplace"],

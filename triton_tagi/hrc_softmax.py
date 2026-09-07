@@ -39,14 +39,54 @@ class HierarchicalSoftmax:
         obs:   Float tensor (n_classes, n_obs) of ±1 encoded observations.
                +1 means bit = 0 (left branch); −1 means bit = 1 (right branch).
         idx:   Int tensor (n_classes, n_obs) of 1-indexed output node positions.
-        n_obs: Number of bits per class = ceil(log2(n_classes)).
+        n_obs: Number of bits per class = ceil(log2(n_classes)) for the padded
+               fixed-depth tree, or the deepest path length for a full tree.
         len:   Total number of unique nodes in the tree (= output layer width).
+        mask:  Optional float tensor (n_classes, n_obs) that is one on real path
+               factors and zero on padding. ``None`` means every factor is real,
+               which is the case for a fixed-depth tree.
+        offset: Optional float tensor (len,) of left-branch prior probits. Node
+               ``j`` shifts its latent variable by ``tau * offset[j]``, so a
+               zero network output reproduces the branch prior ``Phi(offset[j])``.
+               ``None`` means every offset is zero.
     """
 
     obs: Tensor  # (n_classes, n_obs)  float32, values ∈ {+1, −1}
     idx: Tensor  # (n_classes, n_obs)  int32,   1-indexed
     n_obs: int
     len: int
+    mask: Tensor | None = None  # (n_classes, n_obs)  float32, values ∈ {0, 1}
+    offset: Tensor | None = None  # (len,)               float32
+
+    @property
+    def n_classes(self) -> int:
+        """Number of class leaves."""
+
+        return int(self.obs.shape[0])
+
+    @property
+    def is_full(self) -> bool:
+        """True when the tree has exactly ``n_classes - 1`` decision nodes.
+
+        A full tree needs no categorical normalizer: its leaf probabilities
+        already sum to one.
+        """
+
+        return self.len == self.n_classes - 1
+
+    def path_mask(self, device: torch.device | str | None = None) -> Tensor:
+        """Return the (n_classes, n_obs) padding mask, materializing ones."""
+
+        if self.mask is None:
+            return torch.ones_like(self.obs, device=device)
+        return self.mask.to(device) if device is not None else self.mask
+
+    def node_offset(self, device: torch.device | str | None = None) -> Tensor:
+        """Return the (len,) left-branch prior probits, materializing zeros."""
+
+        if self.offset is None:
+            return torch.zeros(self.len, dtype=self.obs.dtype, device=device or self.obs.device)
+        return self.offset.to(device) if device is not None else self.offset
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -120,9 +160,107 @@ def class_to_obs(n_classes: int) -> HierarchicalSoftmax:
 
     return HierarchicalSoftmax(
         obs=torch.tensor(obs, dtype=torch.float32),  # (n_classes, L)
-        idx=torch.tensor(idx, dtype=torch.int32),    # (n_classes, L)
+        idx=torch.tensor(idx, dtype=torch.int32),  # (n_classes, L)
         n_obs=L,
         len=tree_len,
+    )
+
+
+def class_to_obs_full(
+    n_classes: int,
+    *,
+    class_priors: Tensor | list[float] | None = None,
+    use_prior_offsets: bool = True,
+) -> HierarchicalSoftmax:
+    """Build a full binary tree with exactly ``n_classes`` leaves.
+
+    A full binary tree over K classes has exactly K - 1 decision nodes, and its
+    leaf probabilities sum to one without a categorical normalizer::
+
+        sum_c prod_{j in path(c)} p(s_cj | x) = 1
+
+    The classes are split recursively into subsets of sizes ``floor(K/2)`` and
+    ``ceil(K/2)``, so path lengths differ by at most one. For K = 10 this gives
+    six leaves at depth three, four at depth four, and nine decision nodes,
+    against eleven nodes and six discarded leaves for :func:`class_to_obs`.
+
+    Unequal subtree sizes are absorbed by a deterministic branch offset. Node
+    ``j`` with left-subtree prior mass ``pi_j`` stores ``offset[j] =
+    Phi^-1(pi_j)`` and shifts its latent variable by ``tau * offset[j]``, so a
+    zero network output telescopes to the class prior rather than to a
+    depth-dependent power of one half.
+
+    Args:
+        n_classes: Number of output classes, at least two.
+        class_priors: Optional nonnegative class weights, shape (n_classes,).
+            Defaults to a uniform prior.
+        use_prior_offsets: When False, all branch offsets are zero. Use it to
+            ablate the prior correction while keeping the full-tree topology.
+
+    Returns:
+        HierarchicalSoftmax with ``len = n_classes - 1``, a padding ``mask``,
+        and node ``offset`` values.
+    """
+
+    if n_classes < 2:
+        raise ValueError("n_classes must be at least two")
+    if class_priors is None:
+        priors = torch.full((n_classes,), 1.0 / n_classes, dtype=torch.float64)
+    else:
+        priors = torch.as_tensor(class_priors, dtype=torch.float64).reshape(-1)
+        if priors.shape[0] != n_classes:
+            raise ValueError("class_priors must have one weight per class")
+        if not bool(torch.isfinite(priors).all()) or bool((priors < 0).any()):
+            raise ValueError("class_priors must be finite and nonnegative")
+        total = float(priors.sum())
+        if total <= 0.0:
+            raise ValueError("class_priors must have positive total mass")
+        priors = priors / total
+
+    paths: list[list[tuple[int, float]]] = [[] for _ in range(n_classes)]
+    offsets: list[float] = []
+
+    def split(members: list[int]) -> None:
+        if len(members) == 1:
+            return
+        node = len(offsets)  # 0-indexed; the 1-indexed position is node + 1
+        offsets.append(0.0)
+        half = len(members) // 2
+        left, right = members[:half], members[half:]
+        left_mass = float(priors[left].sum())
+        total_mass = left_mass + float(priors[right].sum())
+        fraction = left_mass / total_mass if total_mass > 0.0 else 0.5
+        if use_prior_offsets:
+            clamped = min(max(fraction, 1e-6), 1.0 - 1e-6)
+            offsets[node] = float(torch.special.ndtri(torch.tensor(clamped, dtype=torch.float64)))
+        for member in left:
+            paths[member].append((node + 1, 1.0))
+        for member in right:
+            paths[member].append((node + 1, -1.0))
+        split(left)
+        split(right)
+
+    split(list(range(n_classes)))
+    if len(offsets) != n_classes - 1:
+        raise AssertionError("a full binary tree must have n_classes - 1 decision nodes")
+
+    depth = max(len(path) for path in paths)
+    obs = torch.ones(n_classes, depth, dtype=torch.float32)
+    idx = torch.ones(n_classes, depth, dtype=torch.int32)
+    mask = torch.zeros(n_classes, depth, dtype=torch.float32)
+    for class_index, path in enumerate(paths):
+        for position, (node_index, sign) in enumerate(path):
+            obs[class_index, position] = sign
+            idx[class_index, position] = node_index
+            mask[class_index, position] = 1.0
+
+    return HierarchicalSoftmax(
+        obs=obs,
+        idx=idx,
+        n_obs=depth,
+        len=n_classes - 1,
+        mask=mask,
+        offset=torch.tensor(offsets, dtype=torch.float32),
     )
 
 
@@ -146,9 +284,29 @@ def labels_to_hrc(
         y_idx: Int tensor (B, n_obs) of 1-indexed output node positions.
     """
     device = labels.device
-    y_obs = hrc.obs.to(device)[labels.long()]   # (B, n_obs)
-    y_idx = hrc.idx.to(device)[labels.long()]   # (B, n_obs)
+    y_obs = hrc.obs.to(device)[labels.long()]  # (B, n_obs)
+    y_idx = hrc.idx.to(device)[labels.long()]  # (B, n_obs)
     return y_obs, y_idx
+
+
+def labels_to_hrc_mask(
+    labels: Tensor,
+    hrc: HierarchicalSoftmax,
+) -> Tensor | None:
+    """Return the per-observation padding mask for a batch of labels.
+
+    Args:
+        labels: Integer class labels, shape (B,).
+        hrc:    HierarchicalSoftmax with variable-depth paths.
+
+    Returns:
+        Float tensor (B, n_obs) that is one on real path factors and zero on
+        padding, or None when the tree has a fixed depth.
+    """
+
+    if hrc.mask is None:
+        return None
+    return hrc.mask.to(labels.device)[labels.long()]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -156,6 +314,20 @@ def labels_to_hrc(
 # ──────────────────────────────────────────────────────────────────────────────
 
 _INV_SQRT2: float = 1.0 / math.sqrt(2.0)
+
+
+def _require_fixed_depth(hrc: HierarchicalSoftmax, caller: str) -> None:
+    """Reject trees whose factors these fixed-depth helpers would misread."""
+
+    if hrc.mask is not None and not bool((hrc.mask == 1).all()):
+        raise ValueError(
+            f"{caller} cannot read a variable-depth tree; use "
+            "triton_tagi.hrc_probit.hrc_class_probabilities"
+        )
+    if hrc.offset is not None and bool((hrc.offset != 0).any()):
+        raise ValueError(
+            f"{caller} ignores branch priors; use triton_tagi.hrc_probit.hrc_class_probabilities"
+        )
 
 
 def obs_to_class_probs(
@@ -185,30 +357,88 @@ def obs_to_class_probs(
 
     Returns:
         Class probabilities (unnormalised), shape (B, n_classes).
+
+    Raises:
+        ValueError: If ``hrc`` has variable-depth paths or branch offsets. Use
+            :func:`triton_tagi.hrc_probit.hrc_class_probabilities`, which
+            handles both and returns a normalized distribution.
     """
+    _require_fixed_depth(hrc, "obs_to_class_probs")
     B = ma.shape[0]
     n_classes = hrc.obs.shape[0]
     device = ma.device
 
     # Per-node CDF: Phi(ma[i] / sqrt((1/alpha)^2 + Sa[i]))
-    sigma = torch.sqrt((1.0 / alpha) ** 2 + Sa)      # (B, hrc.len)
+    sigma = torch.sqrt((1.0 / alpha) ** 2 + Sa)  # (B, hrc.len)
     P_z = 0.5 * (1.0 + torch.erf(ma / sigma * _INV_SQRT2))  # (B, hrc.len)
 
     # Gather P_z at the required node indices for all n_classes × n_obs combos
-    idx_0 = hrc.idx.to(device).long() - 1             # (n_classes, L), 0-indexed
-    obs_t = hrc.obs.to(device)                         # (n_classes, L)
+    idx_0 = hrc.idx.to(device).long() - 1  # (n_classes, L), 0-indexed
+    obs_t = hrc.obs.to(device)  # (n_classes, L)
 
     # Expand to (B, n_classes, L) for vectorised gather
-    idx_exp = idx_0.unsqueeze(0).expand(B, -1, -1)     # (B, n_classes, L)
+    idx_exp = idx_0.unsqueeze(0).expand(B, -1, -1)  # (B, n_classes, L)
     node_P = torch.gather(
         P_z.unsqueeze(1).expand(-1, n_classes, -1), 2, idx_exp
-    )                                                  # (B, n_classes, L)
+    )  # (B, n_classes, L)
 
     # obs == +1 → factor = P_z;  obs == −1 → factor = 1 − P_z
-    obs_exp = obs_t.unsqueeze(0).expand(B, -1, -1)     # (B, n_classes, L)
+    obs_exp = obs_t.unsqueeze(0).expand(B, -1, -1)  # (B, n_classes, L)
     factors = torch.where(obs_exp > 0, node_P, 1.0 - node_P)  # (B, n_classes, L)
 
-    return factors.prod(dim=2)                         # (B, n_classes)
+    return factors.prod(dim=2)  # (B, n_classes)
+
+
+def obs_to_class_probs_probit(
+    ma: Tensor,
+    Sa: Tensor,
+    hrc: HierarchicalSoftmax,
+) -> Tensor:
+    """Return HRC path probabilities under the fixed unit-probit model.
+
+    The link variance is structurally fixed at one: it is neither an inferred
+    observation variance nor a tunable prediction-time temperature.
+    """
+
+    if ma.shape != Sa.shape or ma.dim() != 2 or ma.shape[1] != hrc.len:
+        raise ValueError("HRC output moments must have shape (batch, hrc.len)")
+    _require_fixed_depth(hrc, "obs_to_class_probs_probit")
+
+    node_scale = torch.sqrt(Sa.clamp_min(0.0) + 1.0)
+    positive_probability = 0.5 * (1.0 + torch.erf(ma / node_scale.clamp_min(1e-12) * _INV_SQRT2))
+    batch_size = ma.shape[0]
+    num_classes = hrc.obs.shape[0]
+    node_idx = hrc.idx.to(ma.device).long() - 1
+    expanded_idx = node_idx.unsqueeze(0).expand(batch_size, -1, -1)
+    path_probability = torch.gather(
+        positive_probability.unsqueeze(1).expand(-1, num_classes, -1),
+        2,
+        expanded_idx,
+    )
+    signs = hrc.obs.to(ma.device).unsqueeze(0)
+    factors = torch.where(signs > 0, path_probability, 1.0 - path_probability)
+    return factors.prod(dim=2)
+
+
+def obs_to_class_probs_tagiv(
+    ma: Tensor,
+    Sa: Tensor,
+    hrc: HierarchicalSoftmax,
+    alpha: float = 3.0,
+) -> Tensor:
+    """Convert interleaved HRC TAGI-V node moments to class probabilities."""
+
+    if ma.shape != Sa.shape or ma.shape[-1] != 2 * hrc.len:
+        raise ValueError("HRC TAGI-V output must have width 2 * hrc.len")
+    node_mean = ma[..., 0::2]
+    node_epistemic = Sa[..., 0::2].clamp_min(0.0)
+    node_aleatoric = ma[..., 1::2].clamp_min(0.0)
+    return obs_to_class_probs(
+        node_mean,
+        node_epistemic + node_aleatoric,
+        hrc,
+        alpha=alpha,
+    )
 
 
 def get_predicted_labels(
