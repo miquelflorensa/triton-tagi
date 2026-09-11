@@ -84,6 +84,7 @@ python examples/mnist_cnn.py
 python examples/cifar10_cnn.py --n_epochs 100
 python examples/cifar10_resnet18.py --n_epochs 100 --gain_w 0.1 --gain_b 0.1
 python examples/cifar10_resnet18_hrc.py
+python examples/cifar10_resnet18_probitree.py --smoke --no-augment
 python examples/regression.py
 python examples/regression_heteros.py
 python examples/reverse_predictor.py    # sinusoidal PE + MHA-V2 + RMSNorm + HRC head
@@ -124,6 +125,17 @@ reading it top-to-bottom in an evening is a goal, not an accident.
 - `hrc_softmax.py`: hierarchical softmax output for many-class classification.
 - `hrc_probit.py`: full K-leaf trees and the unit-probit class likelihood,
   plus the scale ablations it is compared against.
+- `probitree.py`: exact-K balanced `ProbiTree` construction, stable direct
+  probit moment matching, log-space prediction, and TAGI output messages.
+- `cdf_remax.py`: Laplace-Remax mixture kernels, conditional and scale moments,
+  the epistemic/aleatoric decomposition, and forward diagnostics.
+- `cdf_variance.py`: exact Gaussian moments of the bounded variance activation
+  `h(u) = eps + kappa*Phi(u)`.
+- `remax_kernels.py`: the `phi(alpha) I_n(beta)` kernel forms the Remax moments
+  are built on, with the negative-tail series the textbook forms lose to
+  cancellation.
+- `remax_scale.py`: `LogScalePosterior` plus the ADF and grid fits for the
+  shared Remax log-scale.
 - `checkpoint.py`: `RunDir` (run-directory manager) and `load_model`.
 - `kernels/common.py`: fused Triton kernels for Linear / Conv2D / BN.
 - `kernels/attention.py`: fused Triton kernels for `MultiheadAttentionV2`
@@ -279,8 +291,9 @@ prediction = head.predict(test_features)
 ```
 
 Choose `probit_ovr`, `remax_lognormal`, `remax_laplace_diag`, `hrc`,
-`hrc_probit`, `multinomial_probit`, `agci`, `agci_remax`, `gumbel_agci`,
-`logit_site`, `ct_agci`, `categorical_tagiv`, `hrc_tagiv`, or `logit_tagiv`.
+`hrc_probit`, `probitree`, `cdf_remax`, `multinomial_probit`, `agci`, `agci_remax`,
+`gumbel_agci`, `logit_site`, `ct_agci`, `categorical_tagiv`, `hrc_tagiv`, or
+`logit_tagiv`.
 The
 `hrc_probit` head fixes its latent link variance at one and does not accept
 `sigma_v`. TAGI-V heads omit
@@ -334,6 +347,96 @@ Laplace posterior (`fit_hrc_log_tau_laplace`) are research ablations against
 that model, not part of it.
 `experiments/last_layer/run_hrc_calibration.py` runs the main comparison and
 those ablations on frozen CIFAR-10 features.
+
+### ProbiTree direct branch updates
+
+`head="probitree"` is the exact-K tree without deterministic gate offsets. It
+uses an explicit fixed branch-noise variance `probitree_r` consistently in
+training and prediction. A class label observes only the branch signs on its
+path; the network receives the analytical probit messages `g` and `h`, not a
+Gaussian regression update toward encoded +/-1 targets.
+
+The first TAGI adapter deliberately processes one observation at a time:
+
+```python
+from triton_tagi import ProbiTree, TAGILastLayerClassifier
+
+tree = ProbiTree(10)  # nine internal gates, preorder IDs, no dummy leaves
+head = TAGILastLayerClassifier(
+    features.shape[1],
+    10,
+    head="probitree",
+    probitree_tree=tree,
+    probitree_r=1.0,
+)
+history = head.fit(features, labels, epochs=20, batch_size=1)
+prediction = head.predict(test_features)
+```
+
+For non-power-of-two class counts, the constructor initializes gate biases so
+the zero-input prediction is uniform at recorded reference variances. Pass
+`probitree_reference_variances=` to choose a representative variance vector,
+or call `initialize_probitree_uniform(...)` later. Checkpoints store `r`, those
+reference variances, and the complete class-to-path mapping. The lower-level
+`probitree_label_update` API returns posterior moments, moment changes, stable
+`g/h` messages, and pre-update log evidence for custom TAGI networks.
+
+For end-to-end TAGI ResNet-18 training, use:
+
+```bash
+python examples/cifar10_resnet18_probitree.py --epochs 100 --probitree-r 1.0
+```
+
+The runner records `r`, the exact tree, reference variances, NLL/Brier/ECE,
+and checkpoints. Its `--smoke` mode executes the same full network on four
+training examples and eight test examples.
+
+
+### CDF-TAGI-V / Remax
+
+`head="cdf_remax"` is one interleaved `2K` layer followed by `EvenProbit`. The
+even stream is the prediction head `Z_i`; the odd stream is a pre-activation
+variance head `U_i` whose bounded activation `h(u) = eps + kappa*Phi(u)` is the
+learned aleatoric logit noise, so that noise is confined to `(eps, eps+kappa)`
+by construction. No `Remax` layer sits in the forward path: class probabilities
+are not an activation for this head but the analytic Laplace-Remax average over
+both heads and a shared positive deviation scale `s = e^L`.
+
+```python
+from triton_tagi import TAGILastLayerClassifier
+
+head = TAGILastLayerClassifier(
+    features.shape[1], 10, head="cdf_remax",
+    cdf_epsilon=0.01, cdf_kappa=0.05, cdf_aleatoric_init=0.02,
+)
+head.fit(features, labels, epochs=10)
+# The log-scale is a separate inference channel: fit it with the network
+# frozen, on a split disjoint from training. It is worth ~0.17 nats.
+head.calibrate_remax_log_scale(calibration_features, calibration_labels, method="grid")
+prediction = head.predict(test_features)
+```
+
+`eps` and `kappa` must be sized to the logit scale the head actually sees.
+The values above were selected against a converged 95%-accurate frozen
+backbone; on an untrained one the variance head saturates against its own cap.
+`examples/cifar10_resnet18_cdf_remax.py` trains this head end to end on a TAGI
+ResNet-18 and prints a `band = (h - eps)/kappa` occupancy column for exactly
+that reason. **That end-to-end run does not converge** — see
+[experiments/last_layer/FINDINGS.md](experiments/last_layer/FINDINGS.md) §5.
+
+### A hidden layer in front of the head
+
+Every head takes `hidden_dims`, which puts `Linear + ReLU` blocks before the
+output layer (default `()` is the single-layer head):
+
+```python
+head = TAGILastLayerClassifier(512, 100, head="hrc", hidden_dims=(512,))
+```
+
+This is worth +2.4 to +2.8 points and 0.21 nats to `hrc` on CIFAR-100 and +19
+points on ImageNet, and nothing to the Remax family. It is not a capacity
+argument: the deterministic MAP reference on the same frozen features is flat
+in depth.
 
 The `logit_tagiv` head is the only one that trains on continuous targets. It
 regresses a teacher's logits over frozen features and learns the observation
@@ -433,3 +536,12 @@ then screens and confirms Probit OVR, lognormal Remax, diagonal Laplace-Remax,
 HRC, dense categorical TAGI-V, and hierarchical TAGI-V heads. It records
 calibration, proper scoring, selective prediction, OOD detection, and
 long-horizon epistemic convergence without post-hoc scaling.
+
+The initialization study built on top of it — every head on CIFAR-10,
+CIFAR-100 and ImageNet-1k across accuracy, calibration and OOD detection, as a
+function of how the last layer is initialized — is written up in
+[experiments/last_layer/FINDINGS.md](experiments/last_layer/FINDINGS.md), with
+the deliverable tables in
+[MEETING_RESULTS.md](experiments/last_layer/MEETING_RESULTS.md). Read FINDINGS
+first: it records the negative results and the two known instrumentation
+defects alongside what worked.

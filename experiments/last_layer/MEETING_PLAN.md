@@ -231,6 +231,11 @@ native epistemic AUROC was **0.2374** — worse than chance, while entropy gave
 0.9244. If that reproduces across heads it is a finding, not a bug, and the
 supervisors should see it.
 
+**Resolved 2026-09-08 (session 4): it reproduces, and the cause is now known.**
+It is not a finding about TAGI's uncertainty and it is not chance-level noise --
+in this frozen-feature setting the native epistemic score is, to rank
+equivalence, the backbone's feature norm. See §10.
+
 ---
 
 ## 4. Execution plan
@@ -409,10 +414,14 @@ groups, best above n≈3000.
 1. ~~**No ImageNet OOD set is cached.**~~ **DECIDED 2026-09-07: report
    ImageNet with accuracy + calibration only**, and say so in the table
    caption. No OOD source will be cached, so the Day-2 budget stands as
-   written. Consequence to state plainly in the deck: the native-epistemic OOD
-   column — the one that carries the TAGI-over-softmax story — is a
-   **CIFAR-10 / CIFAR-100 result only**, and nothing here shows whether it
-   holds at 1000 classes. The ImageNet row's OOD cells are `n/a`, not blank.
+   written. Consequence to state plainly in the deck: the OOD columns are a
+   **CIFAR-10 / CIFAR-100 result only**, and nothing here shows whether they
+   hold at 1000 classes. The ImageNet row's OOD cells are `n/a`, not blank.
+   **Amended 2026-09-08 (session 4):** this item used to call the
+   native-epistemic column "the one that carries the TAGI-over-softmax story".
+   It carries no story in this setting — §10 — so the missing ImageNet OOD set
+   costs less than it appeared to, and the entropy / negative-max-probability
+   columns are what the CIFAR-only caveat now applies to.
 2. ~~**`hrc` backbone init needs the class→node projection.**~~ Resolved and
    tested; see §2. It needed one amendment (class-centering, to fix the gauge
    on the padded tree's single-branch nodes).
@@ -527,154 +536,234 @@ Three things to carry into the screen:
 
 ---
 
-## 9. Handoff — state as of 2026-09-07, end of session 2
+## 9. Handoff — state as of 2026-09-08, end of session 3
 
-Session 1's handoff is preserved in git (`6ef20ff`); this replaces it.
+Session 1's handoff is in `6ef20ff`, session 2's in `6ccc847`; this replaces
+both. The compute the plan asked for is **done**. What is left is one
+correction in flight, two documented defects, and the deck.
 
 ### Where the compute is
 
 | stage | state |
 |---|---|
-| CIFAR-10 padded screen | **done**, 116/116 |
-| CIFAR-100 padded screen | running, ~103/116 |
-| CIFAR-10 + CIFAR-100 full-tree `hrc` arm | queued, 36 cells each, waits on the padded screen |
-| `select` both datasets | queued behind that |
-| `init_confirm` | **not started** — inspect the selections first, it is ~4.5 h |
-| `evaluate --stage init_confirm` | not started |
-| `calibrate --stage init_confirm` | not started |
-| ImageNet screen | **never run**, not one cell |
+| CIFAR-10 / CIFAR-100 screen | **done**, 152/152 each |
+| `select` both datasets | **done** |
+| `init_confirm`, 200 epochs x 5 seeds | **done** |
+| `evaluate --stage init_confirm` | **done** |
+| `calibrate --stage init_confirm` | **done**, global / level / node |
+| ImageNet screen | **done**, 60/60 at 1 epoch |
+| ImageNet confirm | **done**, 7 arms x 3 seeds at 4 epochs |
+| `hrc:full` re-run without readout offsets | **in flight**, see below |
 
-Measured cell cost, all-in through the driver (CIFAR-10, 20 epochs, ~29 s/cell
-average): `remax_lognormal` 4.8 s training, `hrc` 8.7 s, `logit_tagiv` 8.1 s,
-`remax_laplace_diag` 12.9 s; CIFAR-100 roughly 1.3-1.8x that. The full CIFAR-10
-screen took ~52 min, so §4's 70-min two-dataset estimate was optimistic mainly
-on CIFAR-100.
+Deliverable tables are generated into `MEETING_TABLES.md` by
+`build_meeting_tables.py`, which reads only what is on disk: tables 1-5 as
+§5 specifies, 2b for ImageNet, 6a-6d for the HSM calibration methods, and
+appendices A-C listing every combination rather than the selected ones.
 
-### What session 2 changed
+### The two defects this study found in its own instrumentation
 
-1. **Report carries the cell identity** (`d0d8e55`). `report.csv` named rows by
-   `(dataset, head, seed, epoch, evaluation_kind)` and the summary grouped by
-   `(dataset, head, evaluation_kind)`. `init_confirm` evaluates **two arms per
-   head**, so both would have collapsed into one summary row reporting their
-   mean — the delta this study exists to measure, averaged away — and tables
-   2-4 had no gain or `sigma_v` column at all. Rows now carry
-   `stage/mean_init/hrc_tree/gain_w/gain_b/sigma_v/calibration`. Regenerating
-   the v2 report reproduces all 132 rows and 1664 summary rows unchanged.
-2. **`evaluate` can read the init tree** (`3bb25da`). It hardcoded
-   `stage_root(..., "confirm", ...)`, so the plan's own Day-2 command would
-   have re-evaluated the v2 runs and produced **no init rows at all**, leaving
-   every table empty with nothing visibly wrong. Now `--stage`.
-3. **ImageNet arm covered, and one duplicate cell dropped** (`1129a9b`). It
-   had no tests despite running unattended. Also `confirm_configs` paired
-   `logit_tagiv` with a `random` counterpart that is bit-identical to `zero`:
-   half an hour of the overnight window, and a delta of exactly zero reported
-   as though measured.
-4. **Axis 4 exists** — see §2. `hrc` now runs both trees (§1 amendment),
-   because the padded tree cannot be gain-calibrated at all.
-5. **`select` keeps the trees apart and carries `hrc_tree` forward.** Grouping
-   by head alone made padded and full compete for one slot, and the config
-   projection dropped `hrc_tree` — so a winning full-tree cell would have been
-   confirmed on the **padded** tree, silently, since padded is what `auto`
-   resolves to. This is the same failure mode as the `mean_init` fallback
-   session 1 fixed; the whitelist is the thing to check whenever an axis is
-   added.
-6. **§8 note 2 was wrong and is corrected in place.** See §8.
+**1. `hrc:full` trained with an uncompensated readout bias.**
+`class_to_obs_full` stores `offset[j] = Phi^-1(pi_j)` and `hrc_log_probs` adds
+`tau * offset` to the latent mean at inference. `network.step_hrc` computes its
+innovation against the raw network output and never reads `hrc.offset`, so
+training fits the branch frequencies from data and the readout then applies the
+prior a second time. Proof: zeroing the offset on already-trained weights
+reproduces a separately-trained offsets-off run to four decimals. Measured at
+gain 0.1 / `sigma_v` 0.3, 20 epochs, `zero` init:
+
+| arm | cifar10 NLL | cifar100 NLL | cifar100 top-1 |
+|---|---|---|---|
+| padded | 0.1677 | 1.3077 | 0.7299 |
+| full, offsets on (what the study ran) | 0.1779 | 1.3387 | 0.7295 |
+| full, offsets off | 0.1719 | 1.3154 | 0.7338 |
+
+The offsets are ~75% of the padded-vs-full NLL gap on CIFAR-100, and without
+them the full tree has the better accuracy of the two. `run_study` never passed
+`hrc_prior_offsets`, so it took the constructor default, `True`;
+`run_hsm_calibration` defaults it to `False` for `hrc`, so **the finished
+calibration slide and this study's `hrc:full` arm were not the same model** --
+same topology, different readout.
+
+*Decided 2026-09-08:* `study.json` pins `hrc_full_prior_offsets: false`, the
+corrected arm is `hrc:full`, and the cells already on disk carry no key, resolve
+to offsets-on, and report under **`hrc:full+offsets`** as a measured ablation.
+Nothing was deleted. `hrc_prior_offsets` is in `selection_arm`, in `select`'s
+config projection and in `CONFIG_IDENTITY_FIELDS`, which is the three-place
+check every axis here has needed.
+
+The deeper fix -- training against the shifted latent, so the offset is a prior
+rather than a bias -- is a model change and is **not** done.
+
+**2. The native-epistemic OOD column is two different scores.**
+`run_study.predict_batches` reduces `ClassificationPrediction.epistemic_variance`,
+which `classification.py` leaves at the network's raw output variance for
+`hrc` -- node space. `calibrated_predict_batches` reduces
+`hsm_class_moments(...).variance` -- class-probability space. Its docstring
+claims they compare like with like; the reduction matches, the quantity does
+not. So the 0.1052 -> 0.8962 jump between the uncalibrated and calibrated rows
+of table 6a is **a change of score, not an effect of calibration**. The
+like-for-like numbers are in 6c, which is probability-space throughout:
+calibration is worth ~nothing on CIFAR-10 (0.907 -> 0.908) and a modest real
+gain on CIFAR-100 (0.752 -> 0.776 level, 0.795 node). The column also is not
+comparable across heads. Documented in the table captions; **not fixed** --
+fixing it means one line in `predict_batches` and re-running `evaluate` over
+155 checkpoints, about 26 minutes.
+
+### The trees are not the same tree
+
+Worth saying plainly, because it is the first question the arm invites.
+`class_to_obs_full` does not prune `class_to_obs`; it rebuilds by recursive
+median split. For K = 10 the padded root splits eight classes against two and
+the full root splits five against five. An `hrc:full` row is therefore not an
+`hrc` row minus padding. Pruning the padded tree's degenerate single-child
+nodes -- 3 and 6 at K = 10 -- would also reach nine nodes while keeping the
+padded shape, and is the construction to reach for if node-for-node continuity
+with the padded arm ever matters.
+
+### Still open
+
+1. **`hrc:full` re-run.** Screen, select, confirm, evaluate, calibrate and the
+   tables, driven by `logs/offsets_rerun.log`. Everything else on disk keeps
+   its hash and is skipped.
+2. **Table 5 / 6a is partial against §5.** It asks for all three init arms on
+   both datasets; CIFAR-10's `hrc:full` selection was `random`, so no `zero`
+   counterpart was confirmed, and `backbone` was never confirmed anywhere.
+   "Does calibration absorb the init delta" is answerable on CIFAR-100 only.
+3. **No OOD for the screen grid.** The screen keeps its checkpoints (1824,
+   435 MB), so `evaluate --stage init_screen` would fill appendix B in for all
+   304 cells at the measured ~10 s per checkpoint, about an hour. Not run.
+4. **ImageNet has no calibration arm and no OOD**, by decision (§6), and
+   `remax_laplace_diag` trains there at batch 134 against 256 for every other
+   head -- its Laplace Jacobian is O(K^2) and OOMs otherwise. Stated in the
+   appendix C caption.
+5. **Deliverable 3 wants a figure**, three panels; it is currently a table.
+   There is no deck.
 
 ### The epoch-0 trap, and what it says about three of the four heads
 
-Found while previewing what `select` would choose, and it is the most
-consequential thing session 2 turned up.
+Found in session 2 and unchanged. `select_stage` could pick epoch 0, the prior
+before any data. For `random` and `zero` that is a chance-level model that never
+wins; for `backbone` epoch 0 is the backbone's own trained `fc` read through the
+head's link, so it scores like the baseline it copies and **was winning** --
+best validation NLL fell at epoch 0 in 7/12 `remax_lognormal` backbone cells,
+11/12 `remax_laplace_diag`, 4/4 `logit_tagiv` on CIFAR-10.
 
-`select_stage` could pick **epoch 0**, the prior before any data. For the
-`random` and `zero` arms that is a chance-level model that never wins, which
-is why the hole survived. For `backbone` epoch 0 is not untrained at all — it
-is the backbone's own trained `fc` read through the head's link — so it scores
-like the baseline it copies: CIFAR-10 `remax_lognormal` 0.9539 / 0.1913 at
-epoch 0 against `pytorch_softmax` 0.9500 / 0.1941.
+Epoch 0 is excluded from selection. It is reported in its own warm-start table
+instead, which needs no seeds: nothing has trained and the prior variances are a
+deterministic function of gain. One place it still leaks: `evaluate`'s own
+best-checkpoint search does not exclude it, so one `best val` row in appendix A
+(cifar10 `remax_lognormal` backbone, seed 4) is the untrained prior. Flagged in
+the caption.
 
-**And it was winning.** Best validation NLL fell at epoch 0 in 7/12
-`remax_lognormal` backbone cells, 11/12 `remax_laplace_diag`, 4/4
-`logit_tagiv` on CIFAR-10. The study was on course to select untrained cells,
-confirm them at 200 epochs, and report its own baseline as a TAGI result.
+The wider finding, which is *not* an initialization result: on CIFAR-10 the
+untrained warm start beats every trained checkpoint for all three
+non-hierarchical heads, which peak at epoch 1-2 and decay after, mean confidence
+climbing to 0.99 at flat accuracy. `hrc` trains properly and enormously
+(0.6846 -> 0.1733). Confirm runs 200 epochs anyway and its checkpoint list
+includes epochs 1, 2 and 3, so `evaluate` reports each head's true optimum and
+the 200-epoch horizon side by side.
 
-**Decided (2026-09-07):** epoch 0 is excluded from selection, matching
-`run_imagenet_init_study.py`, which already skipped it. The warm start is
-reported in its own table instead — it needs no seeds, since nothing has
-trained and the prior variances are a deterministic function of gain.
+### The initialization result, as it now stands
 
-The wider finding, which is *not* an initialization result and must not be
-presented as one:
+`zero` is the recommendation, and the reason is robustness rather than a better
+optimum. Tuning gain per arm closes the accuracy gap that the single-gain probes
+in §8 showed -- `remax_lognormal` random reaches 0.7587 at gain 0.03 against
+zero's 0.7345 -- but `remax_laplace_diag` zero sits at 0.7549 / 1.5686 at every
+one of the four gains while random spans 0.4007 to 0.7482. `zero` removes a
+tuning axis; that is the slide. `backbone` wants a *tight* prior, not a loose
+one, which is the opposite of what §8 predicted and is corrected in place there.
+`logit_tagiv` is insensitive to all of it, as a distillation head should be.
 
-| dataset | head | epoch 0 NLL | best trained NLL | at epoch |
-|---|---|---|---|---|
-| CIFAR-10 | `hrc` | 0.6846 | **0.1733** | 20 |
-| CIFAR-10 | `hrc:full` | 0.4559 | **0.1878** | 20 |
-| CIFAR-10 | `remax_lognormal` | **0.1913** | 0.2000 | 1 |
-| CIFAR-10 | `remax_laplace_diag` | **0.1969** | 0.2514 | 1 |
-| CIFAR-10 | `logit_tagiv` | **0.1739** | 0.1767 | 1 |
-| CIFAR-100 | `hrc` | 1.6503 | **1.3683** | 20 |
-| CIFAR-100 | `remax_lognormal` | 1.8647 | **1.3068** | 2 |
-| CIFAR-100 | `logit_tagiv` | **0.9575** | 0.9639 | 1 |
-
-So on CIFAR-10 the untrained warm start beats every trained checkpoint for all
-three non-hierarchical heads, while `hrc` trains properly and enormously.
-Those three heads peak at epoch 1-2 and decay after, with mean confidence
-climbing to 0.99 at flat accuracy — the 20-epoch screen and the 200-epoch
-confirm both read them well past their best. **Decided:** run confirm at 200
-epochs as planned anyway; its checkpoint list already includes epochs 1, 2 and
-3, so `evaluate` will report each head's true optimum and the 200-epoch
-horizon side by side, with five seeds on both.
-
-### The open questions, updated
-
-1. ~~Is the +22 point gap a rate effect or a floor?~~ **Neither — it was a
-   gain confound, and it is largely gone.** The §8 probe sat at gain 0.3 /
-   `sigma_v` 0.1, where `remax_lognormal` random is 0.5271 and zero 0.7471.
-   Tuning gain per arm on the finished CIFAR-100 grid, random reaches 0.7587
-   (gain 0.03) and `remax_laplace_diag` random reaches 0.7482 (gain 1.0), so
-   the accuracy gap essentially closes. He random means are not on a floor and
-   are not merely slow: they need a *particular* gain, and the probe used the
-   wrong one for them.
-
-   What survives, and is the better result: **`zero` is the arm that does not
-   care.** `remax_laplace_diag` zero is 0.7550 / 1.569 at every one of the
-   four gains, identical to four decimals, while random spans 0.4007 to 0.7482
-   — a 35-point accuracy range. Recommend `zero` for insensitivity, not for a
-   better optimum.
-
-   Still open at full protocol: whether that holds at 200 epochs, and whether
-   selection on NLL is even the right rule here — on CIFAR-100 it prefers
-   badly underconfident cells (`remax_lognormal` backbone gain 0.03: NLL
-   1.582, ECE 0.440, mean confidence 0.3235 at 76% accuracy, against gain 0.3
-   at NLL 1.649 and ECE 0.045). Worth raising: for a calibration study, NLL
-   with Brier and ECE only as tiebreakers rewards hedging.
-2. ~~Init and gain interact.~~ **Answered, and the plan's predicted direction
-   was backwards.** See §8. Supersedes the old note: read table 3 as "which
-   prior width does each arm want", and lead with `zero`'s flatness.
-3. **Does calibration absorb the init effect?** New, and it is now the
-   question that decides the recommendation — deliverable table 5. If a global
-   gain absorbs the whole delta, the advice is "initialize however you like and
-   calibrate"; if it does not, it is "never use He means on a many-class last
-   layer".
-4. **`hrc` on ImageNet was catastrophic before** (§6 gap 4, acc 0.4232).
-   Unchanged, still untested.
+Selection on NLL is worth raising as a question: on CIFAR-100 it prefers badly
+underconfident cells (`remax_lognormal` backbone gain 0.03: NLL 1.582, ECE
+0.440, mean confidence 0.3235 at 76% accuracy). For a calibration study, NLL
+with Brier and ECE only as tiebreakers rewards hedging.
 
 ### Housekeeping
 
-- Nothing in `runs/` was deleted this session. The v2 `report.csv` /
-  `report_summary.csv` were **regenerated** in place after the schema change,
-  verified row-for-row identical on the shared columns; a pre-change copy is
-  in the session scratchpad, which is not durable.
-- `runs/last_layer/.../heads/init_screen/` is ~150 MB for the padded screen and
-  will roughly grow by a third with the full-tree arm.
-- The ImageNet inputs were pre-flighted: 129 train shards, 5 val shards,
-  `pretrained_fc.pt` and `feature_statistics.pt` all present under
-  `features_shuffled`, which is where the driver reads them. Note §2's table
-  says `features/pretrained_fc.pt`; both exist, and the driver uses the
-  `features_shuffled` copy.
-- GPU 1 is running unrelated user jobs (a streamlit app and
-  `next_token_predictor.py`). Everything here ran on GPU 0. The ImageNet
-  overnight queue can halve its wall clock with `--gpu-shards 2` **only** if
-  GPU 1 is free by then; one GPU at ~6.6 h still fits.
+- Nothing in `runs/` has been deleted in any session. The offsets re-run adds
+  cells beside the old ones rather than replacing them.
+- `runs/` is 37 GB; the ImageNet feature cache and the `logit_tagiv` train shard
+  are inputs to every ImageNet run here and must be preserved.
+- GPU 1 runs unrelated user jobs. Everything here ran on GPU 0.
 - `experiments/scaling_theory_stage2` (3.9 GB, untracked) still awaits its
   delete/keep decision. Still unrelated.
+
+---
+
+## 10. Session 4 -- the native-epistemic column, explained
+
+### Why the native-epistemic column is below chance
+
+Established 2026-09-08 (session 4) with `run_probitree_uq.py`; numbers in
+`experiments/last_layer/probitree_uq.json`. This supersedes reading the
+worse-than-chance AUROCs as a result about TAGI.
+
+**The mechanism.** A frozen *deterministic* backbone hands the head zero input
+variance, so the TAGI linear output variance collapses to `Sz = ma^2 @ Sw + Sb`
+-- no `Sa` term survives. With a near-isotropic `Sw` that is a monotone
+function of the feature energy `||f||^2`, which is a property of the setup, not
+of the head and not of anything training learned. Measured on CIFAR-10 test,
+rank correlation of the reduced epistemic score against `||f||^2`:
+
+| head | spearman(epistemic, energy) | AUROC epistemic vs SVHN | AUROC energy alone |
+|---|---|---|---|
+| ProbiTree (gain 0.1, r 1.0, random) | **+0.9988** | 0.1191 | 0.1149 |
+| `hrc` (gain 0.3, sigma_v 0.3, zero) | +0.7136 | 0.1771 | 0.1149 |
+
+SVHN's features are *smaller* than CIFAR-10's -- mean `||f||^2` 24.04 against
+33.04 -- so a score that rises with feature norm is pointed the wrong way. The
+0.1149 column is the same number for both heads because it is the same
+features: the head contributes nothing to it.
+
+**The confirmation, over 75 sets of graded shift.** Sweeping the cached
+CIFAR-10-C shards and scoring each against the clean test set:
+
+| head | spearman(energy gap, AUROC epistemic) | spearman(accuracy, AUROC epistemic) | spearman(accuracy, AUROC entropy) |
+|---|---|---|---|
+| ProbiTree | **+0.9883** | +0.9362 | -0.9868 |
+| `hrc` | +0.9043 | +0.8356 | -0.9660 |
+
+Every one of the 75 shards has energy below ID, and the epistemic AUROC is
+below 0.5 in **75/75**, spanning 0.0583 (`contrast_s5`, gap -11.07, accuracy
+0.3213) to 0.4980 (`brightness_s1`, gap -0.04, accuracy 0.9466). The intercept
+is the tell: where the energy gap vanishes the AUROC is chance to three
+decimals. And the sign on accuracy is the opposite of the entropy control --
+the *more* a corruption destroys accuracy, the *more* confidently the native
+epistemic score reports reduced uncertainty. Entropy behaves correctly on the
+same runs (0.5014 at `brightness_s1`, 0.9469 at `contrast_s5`).
+
+**What this costs the deck.** The native-epistemic column was the one carrying
+the TAGI-over-softmax story (§3), and in the frozen last-layer setting it
+cannot carry it -- not because it scores badly but because it is a restatement
+of `||f||^2`. Normalizing it by feature energy is rank-equivalent to deleting
+it: at spearman 0.9988 there is no ProbiTree signal left underneath. The honest
+slide reports entropy and negative-max-probability as the OOD story here (0.91
+/ 0.92 AUROC, comparable across heads), states the epistemic column as a
+diagnostic of the frozen-feature setup, and does not present 0.2374 or 0.1191
+as an uncertainty result. Recovering a real epistemic column needs input
+variance to reach the head -- an unfrozen or stochastic backbone -- which is a
+different study.
+
+**Caveats, stated.** One seed (0), 20 epochs, CIFAR-10 only, and the
+`||f||^2` account is verified empirically rather than derived through each
+head's link. The `hrc` row's looser 0.7136 says its node-space reduction mixes
+in something beyond feature norm; that residue is not identified, and its
+shard-level behaviour is the same as ProbiTree's regardless.
+
+### The ProbiTree arm
+
+Not part of the four-head study and deliberately outside `run_study.py`'s
+run-hash space; it reuses the same cached features, batch size and metric
+functions. `probitree_r` (branch-noise variance) stands in for axis 3, and
+`mean_init="backbone"` is excluded because a gate mapping cannot be read off
+class-logit weights. A 16-cell gain x r x init screen at 20 epochs selected
+gain 0.1, r 1.0, random by validation NLL; the largest init effect anywhere in
+the grid is 0.0041 NLL (gain 0.1, r 0.25) and it is 0.0011 or less at r = 1.0,
+so the axis-1 story here is "no effect", unlike the other heads. `probitree_r`
+is the axis that matters: at gain 0.03 it moves validation NLL from 0.2136 at
+r = 0.25 to 0.4699 at r = 1.0, while accuracy holds at 95.0% either way, so it
+is purely a confidence knob. The confirmed cell reaches accuracy 0.9462, NLL 0.1969, ECE 0.0117 against the
+`hrc` baseline's 0.9479 / 0.1816 / 0.0049 -- competitive on accuracy, behind on
+calibration. Its role in this plan is as the clean instrument for the epistemic
+question above, not as a fifth head in the tables.
