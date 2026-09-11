@@ -197,6 +197,37 @@ def stage_configs(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+# remax_laplace_diag's Laplace Jacobian materializes a (batch, K, K) tensor in
+# laplace_remax's EAZ einsum, so its memory grows with the square of the class
+# count. At K = 1000 the manifest's 1024-row validation batch asks for
+# 1024 * 1000^2 * 8 = 8.19 GB in a single allocation, which is exactly the
+# request that OOMed the first ImageNet screen before this head had trained one
+# step. Every other head is unaffected and keeps the manifest's batch.
+#
+# The budget below sizes the EAZ tensor alone, which is a proxy: measured peak
+# allocation is about 5x it, because the einsum's intermediates are live at the
+# same time. Measured on a 15.57 GiB card with 11.17 GiB free --
+#   batch 134 -> 5.51 GiB peak, batch 256 -> 10.50 GiB peak, batch 1024 -> OOM
+# -- so a 1 GiB budget yields batch 134 and a ~5.5 GiB peak. Batch 256 does fit
+# in isolation, but at 94% of free memory it is far too tight for an unattended
+# run sharing the card, so this head trains at a smaller batch than the others
+# on ImageNet. That is a real confound between heads and is stated in the
+# deliverable table's caption rather than hidden.
+QUADRATIC_HEADS = frozenset({"remax_laplace_diag"})
+QUADRATIC_BYTE_BUDGET = 1 << 30
+BYTES_PER_ELEMENT = 8
+
+
+def safe_batch_size(requested: int, head: str, num_classes: int) -> int:
+    """Shrink a batch for heads whose activation grows with the class count."""
+
+    if head not in QUADRATIC_HEADS:
+        return requested
+    per_row = num_classes * num_classes * BYTES_PER_ELEMENT
+    affordable = max(1, QUADRATIC_BYTE_BUDGET // per_row)
+    return min(requested, affordable)
+
+
 def centered_logits(logits: torch.Tensor) -> torch.Tensor:
     """The distillation target: teacher logits with the class mean removed."""
 
@@ -286,7 +317,9 @@ def run_configuration(
     epochs: int,
     args: argparse.Namespace,
 ) -> None:
-    batch_size = manifest["last_layer"]["batch_size"]
+    batch_size = safe_batch_size(
+        manifest["last_layer"]["batch_size"], config["head"], NUM_CLASSES
+    )
     run_config = {
         "dataset": "imagenet1k",
         "stage": stage,
@@ -306,7 +339,9 @@ def run_configuration(
 
     train = train_shards(manifest)
     validation = validation_shards(manifest)
-    validation_batch = manifest["last_layer"]["validation_batch_size"]
+    validation_batch = safe_batch_size(
+        manifest["last_layer"]["validation_batch_size"], config["head"], NUM_CLASSES
+    )
 
     seed_everything(seed)
     classifier = build_classifier(manifest, config, args.device)

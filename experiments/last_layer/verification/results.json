@@ -1,0 +1,176 @@
+{
+  "state": {
+    "mu": [
+      0.8,
+      -0.3,
+      0.15
+    ],
+    "var_z": [
+      0.18,
+      0.09,
+      0.25
+    ],
+    "nu": [
+      -0.7,
+      0.1,
+      -0.3
+    ],
+    "r": [
+      0.4,
+      0.2,
+      0.3
+    ],
+    "epsilon": 0.02,
+    "kappa": 1.5,
+    "scale": 1.0
+  },
+  "quadrature": {
+    "coarse": {
+      "laplace_order": 160,
+      "hermite_order": 32
+    },
+    "fine": {
+      "laplace_order": 256,
+      "hermite_order": 48
+    }
+  },
+  "monte_carlo": {
+    "draws": 1200000,
+    "seed": 20260910
+  },
+  "predictive_probabilities": [
+    0.5770121024718625,
+    0.15358355029087276,
+    0.2694043472373571
+  ],
+  "all_zero_probability": 0.038829300482037386,
+  "all_zero_probability_mc": 0.0389,
+  "max_probability_error_vs_mc": 0.0003382310969104463,
+  "max_covariance_error_vs_mc": 0.00013134650320295593,
+  "forward_quadrature_refinement_error": 4.850564394587309e-13,
+  "simplex_mean_error": 9.237055564881302e-14,
+  "covariance_row_sum_error": 2.7918820033612235e-11,
+  "covariance_min_eigenvalue": -1.6903686783642513e-11,
+  "covariance_diagonal_within_bernoulli_bound": true,
+  "whole_logit_gain_invariance_error": 1.0325074129013956e-14,
+  "zero_mean_scale_invariance_error": 4.007905118896815e-14,
+  "scale_sweep": {
+    "0.25": [
+      0.8213219351353445,
+      0.01094319274026158,
+      0.16773487212439264
+    ],
+    "0.5": [
+      0.7291926113232304,
+      0.060729306665082534,
+      0.21007808201170358
+    ],
+    "1": [
+      0.5770121024718625,
+      0.15358355029087276,
+      0.2694043472373571
+    ],
+    "2": [
+      0.4545520283906087,
+      0.2374263529755521,
+      0.3080216186340044
+    ],
+    "4": [
+      0.3865873779561232,
+      0.28813432477367884,
+      0.3252782972703907
+    ]
+  },
+  "integrated_scale": {
+    "prior_mean": 0.0,
+    "prior_variance": 0.25,
+    "probabilities": [
+      0.5840363007327279,
+      0.15153015867400643,
+      0.2644335405933434
+    ],
+    "cov_scale": [
+      -0.04764586860625513,
+      0.030632928075414175,
+      0.01701294053086335
+    ],
+    "simplex_mean_error": 7.771561172376096e-14,
+    "covariance_row_sum_error": 1.8630305631539557e-11,
+    "cauchy_schwarz_satisfied": true
+  },
+  "cdf_head": {
+    "h_mean": [
+      0.43558484755208415,
+      0.824551644856076,
+      0.6143450664560264
+    ],
+    "h_variance": [
+      0.07630474369763746,
+      0.059502622069668776,
+      0.07835656877455266
+    ],
+    "cov_u_h": [
+      0.16982270884244166,
+      0.10880056162335494,
+      0.15209594407111152
+    ],
+    "max_h_mean_error_vs_mc": 0.0002301572000137364,
+    "max_h_variance_error_vs_mc": 0.00015566538888972525,
+    "max_cov_error_vs_stein": 8.466921608274447e-12,
+    "bounded_below": true,
+    "bounded_above": true
+  },
+  "training_channel": {
+    "signed_targets": [
+      1.0,
+      -1.0,
+      -1.0
+    ],
+    "nu_post": [
+      -0.8301087356276634,
+      0.07681675366312489,
+      -0.23503479461764276
+    ],
+    "r_post": [
+      0.39486384974422195,
+      0.19733713871332237,
+      0.27186388249850413
+    ],
+    "mu_z_post": [
+      0.8783283527938099,
+      -0.3763310769872954,
+      -0.2056810254083916
+    ],
+    "var_z_post": [
+      0.1106912216854842,
+      0.08087569222743698,
+      0.1879342058021362
+    ],
+    "max_posterior_error_vs_dense": 4.718447854656915e-16,
+    "all_variances_non_negative": true
+  },
+  "calibration": {
+    "generating_scale": 1.8,
+    "generating_probabilities": [
+      0.4693178716999596,
+      0.22683979804486032,
+      0.3038423302553162
+    ],
+    "labels": 3000,
+    "label_seed": 7891,
+    "label_counts": [
+      1409.0,
+      680.0,
+      911.0
+    ],
+    "batch_reference_log_scale": 0.5821667900110914,
+    "batch_reference_scale": 1.7899125967175473,
+    "batch_reference_log_scale_deviation": 0.05717254563545352,
+    "population_nll_before": 1.0815628581558392,
+    "population_nll_after": 1.0534992707252246,
+    "population_nll_at_generating_scale": 1.0534976875904314
+  },
+  "batch_reference_scale": 1.7899125967175473,
+  "population_nll_before": 1.0815628581558392,
+  "population_nll_after": 1.0534992707252246
+}

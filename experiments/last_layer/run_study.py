@@ -433,9 +433,28 @@ def hrc_tree_variants(manifest: dict[str, Any], head: str) -> list[dict[str, str
     if head not in HIERARCHICAL_HEADS:
         return [{}]
     default = default_hrc_tree(head)
+    offsets = manifest["init_study"].get("hrc_full_prior_offsets")
     variants = []
     for tree in manifest["init_study"].get("hrc_trees", [default]):
-        variants.append({} if tree == default else {"hrc_tree": tree})
+        if tree == default:
+            variants.append({})
+            continue
+        override = {"hrc_tree": tree}
+        # The full tree's branch offsets are a readout-only shift: step_hrc
+        # computes its innovation against the raw network output and never
+        # sees hrc.offset, while hrc_log_probs adds tau * offset at inference.
+        # Training therefore learns the branch frequencies from data and the
+        # readout applies the prior a second time. Measured at gain 0.1 /
+        # sigma_v 0.3, 20 epochs, zero init: zeroing the offset on already
+        # trained weights reproduces a separately trained offsets-off run to
+        # four decimals (cifar100 0.7338 / 1.3154 either way), which is the
+        # proof that no weight ever depended on it, and it costs 0.0233 NLL on
+        # cifar100 and 0.0060 on cifar10. The manifest pins the setting rather
+        # than inheriting the constructor default, so the run hash records
+        # which model was trained.
+        if tree == "full" and offsets is not None:
+            override["hrc_prior_offsets"] = bool(offsets)
+        variants.append(override)
     return variants
 
 
@@ -521,7 +540,15 @@ def selection_arm(config: dict[str, Any]) -> str:
     tree = config.get("hrc_tree")
     if not tree or tree == default_hrc_tree(head):
         return head
-    return f"{head}:{tree}"
+    arm = f"{head}:{tree}"
+    # A full tree with readout offsets and one without are different models,
+    # not two cells of one arm -- see hrc_tree_variants. Cells that predate
+    # this axis carry no key and were trained on the constructor default,
+    # which is offsets on, so they keep their own arm and never compete with
+    # the corrected one for a selection slot.
+    if tree == "full" and config.get("hrc_prior_offsets", True):
+        arm = f"{arm}+offsets"
+    return arm
 
 
 def load_selection(manifest: dict[str, Any], dataset: str, stage: str) -> dict[str, Any]:
@@ -822,6 +849,7 @@ def select_stage(args, manifest: dict[str, Any]) -> None:
                                 "gain_b",
                                 "mean_init",
                                 "hrc_tree",
+                                "hrc_prior_offsets",
                                 "v2bar_init",
                                 "v2bar_weight_var",
                                 "v2bar_bias_var",
@@ -1188,6 +1216,7 @@ CONFIG_IDENTITY_FIELDS = (
     "stage",
     "mean_init",
     "hrc_tree",
+    "hrc_prior_offsets",
     "gain_w",
     "gain_b",
     "sigma_v",

@@ -1,0 +1,64 @@
+{
+  "state": {
+    "mu": [
+      0.8,
+      -0.3,
+      0.15
+    ],
+    "var_z": [
+      0.18,
+      0.09,
+      0.25
+    ],
+    "nu": [
+      -0.7,
+      0.1,
+      -0.3
+    ],
+    "r": [
+      0.4,
+      0.2,
+      0.3
+    ],
+    "epsilon": 0.02,
+    "kappa": 1.5
+  },
+  "prior": {
+    "mean": 0.1,
+    "variance": 0.04000000000000001
+  },
+  "observed_class_zero_based": 1,
+  "predictive_probabilities": [
+    0.5578171612880426,
+    0.16661425814366582,
+    0.2755685805683925
+  ],
+  "class_variances": [
+    0.12169087289673869,
+    0.0677230142801791,
+    0.09698753780478808
+  ],
+  "cov_scale": [
+    -0.008129235211794551,
+    0.005356923680701709,
+    0.002772311531096664
+  ],
+  "posterior_mean": 0.13215165220783576,
+  "posterior_variance_event": 0.03979333226087815,
+  "posterior_variance_full": 0.03968140591744517,
+  "posterior_variance_tilt": 0.038592950583817696,
+  "posterior_mean_full": 0.13215165220783576,
+  "posterior_mean_tilt": 0.13215165220783576,
+  "common_mean_identity_spread": 0.0,
+  "scale_quadrature_refinement_error": 3.902989043069738e-13,
+  "full_projection_no_larger_than_event": true,
+  "full_projection_margin": 0.00011192634343298175,
+  "bernoulli_split_error": 0.0,
+  "expected_bernoulli_variance": [
+    0.12496630296385378,
+    0.07113093284672262,
+    0.1026430001671258
+  ],
+  "cauchy_schwarz_worst_ratio": 0.006698007558274982,
+  "every_variance_non_negative": true
+}

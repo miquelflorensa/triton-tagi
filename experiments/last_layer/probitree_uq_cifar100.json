@@ -1,0 +1,1595 @@
+{
+  "dataset": "cifar100",
+  "num_classes": 100,
+  "hrc_baseline_config": {
+    "gain_w": 0.3,
+    "gain_b": 0.1,
+    "sigma_v": 0.1,
+    "mean_init": "zero"
+  },
+  "features": "runs/last_layer/cifar_frozen_last_layer_v2_40k10k/features/cifar100",
+  "epochs": 20,
+  "seed": 0,
+  "screen": [
+    {
+      "gain": 0.03,
+      "probitree_r": 0.25,
+      "mean_init": "random",
+      "val_nll": 1.955714464187622,
+      "val_accuracy": 0.6629999876022339,
+      "seconds": 32.192269197665155
+    },
+    {
+      "gain": 0.03,
+      "probitree_r": 0.25,
+      "mean_init": "zero",
+      "val_nll": 1.7996256351470947,
+      "val_accuracy": 0.7391999959945679,
+      "seconds": 25.34867114108056
+    },
+    {
+      "gain": 0.03,
+      "probitree_r": 1.0,
+      "mean_init": "random",
+      "val_nll": 2.8681938648223877,
+      "val_accuracy": 0.6165000200271606,
+      "seconds": 25.44779228232801
+    },
+    {
+      "gain": 0.03,
+      "probitree_r": 1.0,
+      "mean_init": "zero",
+      "val_nll": 2.782989978790283,
+      "val_accuracy": 0.7394999861717224,
+      "seconds": 25.688326922245324
+    },
+    {
+      "gain": 0.1,
+      "probitree_r": 0.25,
+      "mean_init": "random",
+      "val_nll": 1.4254355430603027,
+      "val_accuracy": 0.7116000056266785,
+      "seconds": 25.622819147072732
+    },
+    {
+      "gain": 0.1,
+      "probitree_r": 0.25,
+      "mean_init": "zero",
+      "val_nll": 1.3369115591049194,
+      "val_accuracy": 0.7282999753952026,
+      "seconds": 25.33532805647701
+    },
+    {
+      "gain": 0.1,
+      "probitree_r": 1.0,
+      "mean_init": "random",
+      "val_nll": 1.4917380809783936,
+      "val_accuracy": 0.7260000109672546,
+      "seconds": 25.574726972728968
+    },
+    {
+      "gain": 0.1,
+      "probitree_r": 1.0,
+      "mean_init": "zero",
+      "val_nll": 1.4690560102462769,
+      "val_accuracy": 0.734000027179718,
+      "seconds": 25.381169077008963
+    },
+    {
+      "gain": 0.3,
+      "probitree_r": 0.25,
+      "mean_init": "random",
+      "val_nll": 1.4487056732177734,
+      "val_accuracy": 0.7160999774932861,
+      "seconds": 25.295781928114593
+    },
+    {
+      "gain": 0.3,
+      "probitree_r": 0.25,
+      "mean_init": "zero",
+      "val_nll": 1.394336223602295,
+      "val_accuracy": 0.7232000231742859,
+      "seconds": 25.584819415584207
+    },
+    {
+      "gain": 0.3,
+      "probitree_r": 1.0,
+      "mean_init": "random",
+      "val_nll": 1.3538788557052612,
+      "val_accuracy": 0.723800003528595,
+      "seconds": 25.50982275325805
+    },
+    {
+      "gain": 0.3,
+      "probitree_r": 1.0,
+      "mean_init": "zero",
+      "val_nll": 1.3369866609573364,
+      "val_accuracy": 0.7268999814987183,
+      "seconds": 25.641871221363544
+    },
+    {
+      "gain": 1.0,
+      "probitree_r": 0.25,
+      "mean_init": "random",
+      "val_nll": 1.5449395179748535,
+      "val_accuracy": 0.7152000069618225,
+      "seconds": 25.33614043239504
+    },
+    {
+      "gain": 1.0,
+      "probitree_r": 0.25,
+      "mean_init": "zero",
+      "val_nll": 1.5132765769958496,
+      "val_accuracy": 0.7182999849319458,
+      "seconds": 25.940915663726628
+    },
+    {
+      "gain": 1.0,
+      "probitree_r": 1.0,
+      "mean_init": "random",
+      "val_nll": 1.455169677734375,
+      "val_accuracy": 0.7196000218391418,
+      "seconds": 26.326359283179045
+    },
+    {
+      "gain": 1.0,
+      "probitree_r": 1.0,
+      "mean_init": "zero",
+      "val_nll": 1.4439077377319336,
+      "val_accuracy": 0.7208999991416931,
+      "seconds": 25.713363776914775
+    }
+  ],
+  "selected": {
+    "gain": 0.1,
+    "probitree_r": 0.25,
+    "mean_init": "zero",
+    "val_nll": 1.3369115591049194,
+    "val_accuracy": 0.7282999753952026,
+    "seconds": 25.33532805647701
+  },
+  "probitree": {
+    "classification": {
+      "accuracy": 0.7239999771118164,
+      "top5_accuracy": 0.8718000054359436,
+      "mean_confidence": 0.6036304831504822,
+      "ece": 0.12036947160959244,
+      "adaptive_ece": 0.12036947906017303,
+      "classwise_ece": 0.0031224798876792192,
+      "nll": 1.3205925226211548,
+      "brier": 0.40535736083984375,
+      "aurc": 0.08483398705720901,
+      "risk_at_80_coverage": 0.16987499594688416,
+      "risk_at_90_coverage": 0.22188888490200043,
+      "risk_at_95_coverage": 0.24831579625606537
+    },
+    "ood_svhn": {
+      "entropy": {
+        "auroc": 0.8622238039970398,
+        "aupr_ood": 0.9243394732475281,
+        "aupr_id": 0.7843688726425171,
+        "fpr95": 0.4339999854564667
+      },
+      "negative_max_probability": {
+        "auroc": 0.8398049473762512,
+        "aupr_ood": 0.9115473031997681,
+        "aupr_id": 0.7547755241394043,
+        "fpr95": 0.4788999855518341
+      },
+      "native_epistemic": {
+        "auroc": 0.12629982829093933,
+        "aupr_ood": 0.5342556834220886,
+        "aupr_id": 0.16209036111831665,
+        "fpr95": 0.9961000084877014
+      }
+    }
+  },
+  "hrc_baseline": {
+    "classification": {
+      "accuracy": 0.7294999957084656,
+      "top5_accuracy": 0.8755000233650208,
+      "mean_confidence": 0.6405280232429504,
+      "ece": 0.08897195011377335,
+      "adaptive_ece": 0.09021785110235214,
+      "classwise_ece": 0.0026893974281847477,
+      "nll": 1.2858641147613525,
+      "brier": 0.3917866349220276,
+      "aurc": 0.0827561542391777,
+      "risk_at_80_coverage": 0.1626249998807907,
+      "risk_at_90_coverage": 0.2133333384990692,
+      "risk_at_95_coverage": 0.24073684215545654
+    },
+    "ood_svhn": {
+      "entropy": {
+        "auroc": 0.8417626619338989,
+        "aupr_ood": 0.9135650396347046,
+        "aupr_id": 0.7576014995574951,
+        "fpr95": 0.4702000021934509
+      },
+      "negative_max_probability": {
+        "auroc": 0.8268921971321106,
+        "aupr_ood": 0.9046923518180847,
+        "aupr_id": 0.7376837730407715,
+        "fpr95": 0.5004000067710876
+      },
+      "native_epistemic": {
+        "auroc": 0.12032036483287811,
+        "aupr_ood": 0.5326552987098694,
+        "aupr_id": 0.16137734055519104,
+        "fpr95": 0.996999979019165
+      }
+    }
+  },
+  "feature_energy_diagnostic": {
+    "probitree": {
+      "spearman_epistemic_vs_feature_energy": 0.9998188614845276,
+      "auroc_native_epistemic": 0.12629982829093933,
+      "auroc_feature_energy_alone": 0.12730857729911804,
+      "mean_feature_energy_id": 106.84864044189453,
+      "mean_feature_energy_ood": 60.9897346496582
+    },
+    "hrc_baseline": {
+      "spearman_epistemic_vs_feature_energy": 0.9892608523368835,
+      "auroc_native_epistemic": 0.12032036483287811,
+      "auroc_feature_energy_alone": 0.12730857729911804,
+      "mean_feature_energy_id": 106.84864044189453,
+      "mean_feature_energy_ood": 60.9897346496582
+    }
+  },
+  "corruption_energy_sweep": {
+    "probitree": [
+      {
+        "corruption": "brightness",
+        "severity": 1,
+        "mean_feature_energy": 105.79865264892578,
+        "energy_gap_vs_id": -1.04998779296875,
+        "accuracy": 0.7208999991416931,
+        "auroc_native_epistemic": 0.4925566613674164,
+        "auroc_entropy": 0.505693793296814
+      },
+      {
+        "corruption": "brightness",
+        "severity": 2,
+        "mean_feature_energy": 103.52336883544922,
+        "energy_gap_vs_id": -3.3252716064453125,
+        "accuracy": 0.7093999981880188,
+        "auroc_native_epistemic": 0.47709140181541443,
+        "auroc_entropy": 0.5199298858642578
+      },
+      {
+        "corruption": "brightness",
+        "severity": 3,
+        "mean_feature_energy": 100.44145202636719,
+        "energy_gap_vs_id": -6.407188415527344,
+        "accuracy": 0.6916999816894531,
+        "auroc_native_epistemic": 0.4553200602531433,
+        "auroc_entropy": 0.5408985614776611
+      },
+      {
+        "corruption": "brightness",
+        "severity": 4,
+        "mean_feature_energy": 96.91938781738281,
+        "energy_gap_vs_id": -9.929252624511719,
+        "accuracy": 0.6685000061988831,
+        "auroc_native_epistemic": 0.42937445640563965,
+        "auroc_entropy": 0.5674001574516296
+      },
+      {
+        "corruption": "brightness",
+        "severity": 5,
+        "mean_feature_energy": 89.54785919189453,
+        "energy_gap_vs_id": -17.30078125,
+        "accuracy": 0.6010000109672546,
+        "auroc_native_epistemic": 0.37372082471847534,
+        "auroc_entropy": 0.6279132962226868
+      },
+      {
+        "corruption": "contrast",
+        "severity": 1,
+        "mean_feature_energy": 106.32058715820312,
+        "energy_gap_vs_id": -0.5280532836914062,
+        "accuracy": 0.7096999883651733,
+        "auroc_native_epistemic": 0.4969177842140198,
+        "auroc_entropy": 0.5103358030319214
+      },
+      {
+        "corruption": "contrast",
+        "severity": 2,
+        "mean_feature_energy": 96.53620147705078,
+        "energy_gap_vs_id": -10.31243896484375,
+        "accuracy": 0.6360999941825867,
+        "auroc_native_epistemic": 0.42808130383491516,
+        "auroc_entropy": 0.5808958411216736
+      },
+      {
+        "corruption": "contrast",
+        "severity": 3,
+        "mean_feature_energy": 89.55681610107422,
+        "energy_gap_vs_id": -17.291824340820312,
+        "accuracy": 0.5665000081062317,
+        "auroc_native_epistemic": 0.37464529275894165,
+        "auroc_entropy": 0.6333025693893433
+      },
+      {
+        "corruption": "contrast",
+        "severity": 4,
+        "mean_feature_energy": 81.30310821533203,
+        "energy_gap_vs_id": -25.5455322265625,
+        "accuracy": 0.4505000114440918,
+        "auroc_native_epistemic": 0.3067696690559387,
+        "auroc_entropy": 0.7013195157051086
+      },
+      {
+        "corruption": "contrast",
+        "severity": 5,
+        "mean_feature_energy": 72.34165954589844,
+        "energy_gap_vs_id": -34.506980895996094,
+        "accuracy": 0.17520000040531158,
+        "auroc_native_epistemic": 0.22899062931537628,
+        "auroc_entropy": 0.7881246209144592
+      },
+      {
+        "corruption": "defocus_blur",
+        "severity": 1,
+        "mean_feature_energy": 106.2667236328125,
+        "energy_gap_vs_id": -0.5819168090820312,
+        "accuracy": 0.723800003528595,
+        "auroc_native_epistemic": 0.4969879984855652,
+        "auroc_entropy": 0.5035070180892944
+      },
+      {
+        "corruption": "defocus_blur",
+        "severity": 2,
+        "mean_feature_energy": 100.32498931884766,
+        "energy_gap_vs_id": -6.523651123046875,
+        "accuracy": 0.6872000098228455,
+        "auroc_native_epistemic": 0.45723116397857666,
+        "auroc_entropy": 0.5420355796813965
+      },
+      {
+        "corruption": "defocus_blur",
+        "severity": 3,
+        "mean_feature_energy": 89.17591094970703,
+        "energy_gap_vs_id": -17.6727294921875,
+        "accuracy": 0.5874999761581421,
+        "auroc_native_epistemic": 0.37311074137687683,
+        "auroc_entropy": 0.623721718788147
+      },
+      {
+        "corruption": "defocus_blur",
+        "severity": 4,
+        "mean_feature_energy": 80.74986267089844,
+        "energy_gap_vs_id": -26.098777770996094,
+        "accuracy": 0.4634999930858612,
+        "auroc_native_epistemic": 0.3038458824157715,
+        "auroc_entropy": 0.6960829496383667
+      },
+      {
+        "corruption": "defocus_blur",
+        "severity": 5,
+        "mean_feature_energy": 70.0682373046875,
+        "energy_gap_vs_id": -36.78040313720703,
+        "accuracy": 0.30809998512268066,
+        "auroc_native_epistemic": 0.2104906439781189,
+        "auroc_entropy": 0.779019832611084
+      },
+      {
+        "corruption": "elastic_transform",
+        "severity": 1,
+        "mean_feature_energy": 94.37698364257812,
+        "energy_gap_vs_id": -12.471656799316406,
+        "accuracy": 0.6265000104904175,
+        "auroc_native_epistemic": 0.41435396671295166,
+        "auroc_entropy": 0.5950068831443787
+      },
+      {
+        "corruption": "elastic_transform",
+        "severity": 2,
+        "mean_feature_energy": 93.87443542480469,
+        "energy_gap_vs_id": -12.974205017089844,
+        "accuracy": 0.620199978351593,
+        "auroc_native_epistemic": 0.4114345908164978,
+        "auroc_entropy": 0.5957624912261963
+      },
+      {
+        "corruption": "elastic_transform",
+        "severity": 3,
+        "mean_feature_energy": 88.28469848632812,
+        "energy_gap_vs_id": -18.563941955566406,
+        "accuracy": 0.5665000081062317,
+        "auroc_native_epistemic": 0.36780035495758057,
+        "auroc_entropy": 0.643060564994812
+      },
+      {
+        "corruption": "elastic_transform",
+        "severity": 4,
+        "mean_feature_energy": 86.41888427734375,
+        "energy_gap_vs_id": -20.42975616455078,
+        "accuracy": 0.5081999897956848,
+        "auroc_native_epistemic": 0.3528868556022644,
+        "auroc_entropy": 0.6762934327125549
+      },
+      {
+        "corruption": "elastic_transform",
+        "severity": 5,
+        "mean_feature_energy": 84.61500549316406,
+        "energy_gap_vs_id": -22.23363494873047,
+        "accuracy": 0.44530001282691956,
+        "auroc_native_epistemic": 0.33888566493988037,
+        "auroc_entropy": 0.7015268206596375
+      },
+      {
+        "corruption": "fog",
+        "severity": 1,
+        "mean_feature_energy": 107.10130310058594,
+        "energy_gap_vs_id": 0.25266265869140625,
+        "accuracy": 0.7174999713897705,
+        "auroc_native_epistemic": 0.5018376111984253,
+        "auroc_entropy": 0.504947304725647
+      },
+      {
+        "corruption": "fog",
+        "severity": 2,
+        "mean_feature_energy": 102.68997955322266,
+        "energy_gap_vs_id": -4.158660888671875,
+        "accuracy": 0.6801000237464905,
+        "auroc_native_epistemic": 0.47252538800239563,
+        "auroc_entropy": 0.5411401987075806
+      },
+      {
+        "corruption": "fog",
+        "severity": 3,
+        "mean_feature_energy": 98.7029037475586,
+        "energy_gap_vs_id": -8.145736694335938,
+        "accuracy": 0.6319000124931335,
+        "auroc_native_epistemic": 0.44549065828323364,
+        "auroc_entropy": 0.5752546191215515
+      },
+      {
+        "corruption": "fog",
+        "severity": 4,
+        "mean_feature_energy": 93.35071563720703,
+        "energy_gap_vs_id": -13.4979248046875,
+        "accuracy": 0.5652999877929688,
+        "auroc_native_epistemic": 0.40675798058509827,
+        "auroc_entropy": 0.621557891368866
+      },
+      {
+        "corruption": "fog",
+        "severity": 5,
+        "mean_feature_energy": 84.137939453125,
+        "energy_gap_vs_id": -22.71070098876953,
+        "accuracy": 0.3562000095844269,
+        "auroc_native_epistemic": 0.3359586298465729,
+        "auroc_entropy": 0.714358925819397
+      },
+      {
+        "corruption": "frost",
+        "severity": 1,
+        "mean_feature_energy": 90.725830078125,
+        "energy_gap_vs_id": -16.12281036376953,
+        "accuracy": 0.5934000015258789,
+        "auroc_native_epistemic": 0.3821045160293579,
+        "auroc_entropy": 0.615188479423523
+      },
+      {
+        "corruption": "frost",
+        "severity": 2,
+        "mean_feature_energy": 82.62236785888672,
+        "energy_gap_vs_id": -24.226272583007812,
+        "accuracy": 0.49779999256134033,
+        "auroc_native_epistemic": 0.3172723948955536,
+        "auroc_entropy": 0.6867266893386841
+      },
+      {
+        "corruption": "frost",
+        "severity": 3,
+        "mean_feature_energy": 77.10139465332031,
+        "energy_gap_vs_id": -29.74724578857422,
+        "accuracy": 0.37299999594688416,
+        "auroc_native_epistemic": 0.2716377079486847,
+        "auroc_entropy": 0.7434674501419067
+      },
+      {
+        "corruption": "frost",
+        "severity": 4,
+        "mean_feature_energy": 76.66175079345703,
+        "energy_gap_vs_id": -30.1868896484375,
+        "accuracy": 0.3617999851703644,
+        "auroc_native_epistemic": 0.2673178017139435,
+        "auroc_entropy": 0.7460206747055054
+      },
+      {
+        "corruption": "frost",
+        "severity": 5,
+        "mean_feature_energy": 74.17185974121094,
+        "energy_gap_vs_id": -32.676780700683594,
+        "accuracy": 0.27619999647140503,
+        "auroc_native_epistemic": 0.2465447336435318,
+        "auroc_entropy": 0.775329053401947
+      },
+      {
+        "corruption": "gaussian_noise",
+        "severity": 1,
+        "mean_feature_energy": 83.41948699951172,
+        "energy_gap_vs_id": -23.429153442382812,
+        "accuracy": 0.39969998598098755,
+        "auroc_native_epistemic": 0.32531076669692993,
+        "auroc_entropy": 0.7101786136627197
+      },
+      {
+        "corruption": "gaussian_noise",
+        "severity": 2,
+        "mean_feature_energy": 84.1995849609375,
+        "energy_gap_vs_id": -22.64905548095703,
+        "accuracy": 0.2287999987602234,
+        "auroc_native_epistemic": 0.3356851637363434,
+        "auroc_entropy": 0.7466115355491638
+      },
+      {
+        "corruption": "gaussian_noise",
+        "severity": 3,
+        "mean_feature_energy": 93.9579849243164,
+        "energy_gap_vs_id": -12.890655517578125,
+        "accuracy": 0.13249999284744263,
+        "auroc_native_epistemic": 0.42212262749671936,
+        "auroc_entropy": 0.7384084463119507
+      },
+      {
+        "corruption": "gaussian_noise",
+        "severity": 4,
+        "mean_feature_energy": 100.70674896240234,
+        "energy_gap_vs_id": -6.1418914794921875,
+        "accuracy": 0.1080000028014183,
+        "auroc_native_epistemic": 0.4736417829990387,
+        "auroc_entropy": 0.7320595979690552
+      },
+      {
+        "corruption": "gaussian_noise",
+        "severity": 5,
+        "mean_feature_energy": 107.7401123046875,
+        "energy_gap_vs_id": 0.8914718627929688,
+        "accuracy": 0.0877000018954277,
+        "auroc_native_epistemic": 0.524857759475708,
+        "auroc_entropy": 0.725369930267334
+      },
+      {
+        "corruption": "glass_blur",
+        "severity": 1,
+        "mean_feature_energy": 72.5381851196289,
+        "energy_gap_vs_id": -34.310455322265625,
+        "accuracy": 0.1835000067949295,
+        "auroc_native_epistemic": 0.23403340578079224,
+        "auroc_entropy": 0.7823710441589355
+      },
+      {
+        "corruption": "glass_blur",
+        "severity": 2,
+        "mean_feature_energy": 73.13714599609375,
+        "energy_gap_vs_id": -33.71149444580078,
+        "accuracy": 0.1979999989271164,
+        "auroc_native_epistemic": 0.23943938314914703,
+        "auroc_entropy": 0.7830151319503784
+      },
+      {
+        "corruption": "glass_blur",
+        "severity": 3,
+        "mean_feature_energy": 72.6834945678711,
+        "energy_gap_vs_id": -34.16514587402344,
+        "accuracy": 0.23849999904632568,
+        "auroc_native_epistemic": 0.23429563641548157,
+        "auroc_entropy": 0.78079754114151
+      },
+      {
+        "corruption": "glass_blur",
+        "severity": 4,
+        "mean_feature_energy": 74.6816177368164,
+        "energy_gap_vs_id": -32.167022705078125,
+        "accuracy": 0.1379999965429306,
+        "auroc_native_epistemic": 0.25356340408325195,
+        "auroc_entropy": 0.7781702876091003
+      },
+      {
+        "corruption": "glass_blur",
+        "severity": 5,
+        "mean_feature_energy": 72.83663177490234,
+        "energy_gap_vs_id": -34.01200866699219,
+        "accuracy": 0.1712000072002411,
+        "auroc_native_epistemic": 0.23648935556411743,
+        "auroc_entropy": 0.7854363322257996
+      },
+      {
+        "corruption": "impulse_noise",
+        "severity": 1,
+        "mean_feature_energy": 84.07093048095703,
+        "energy_gap_vs_id": -22.7777099609375,
+        "accuracy": 0.4666000008583069,
+        "auroc_native_epistemic": 0.32902464270591736,
+        "auroc_entropy": 0.7190741896629333
+      },
+      {
+        "corruption": "impulse_noise",
+        "severity": 2,
+        "mean_feature_energy": 78.60692596435547,
+        "energy_gap_vs_id": -28.241714477539062,
+        "accuracy": 0.267300009727478,
+        "auroc_native_epistemic": 0.284761518239975,
+        "auroc_entropy": 0.811959445476532
+      },
+      {
+        "corruption": "impulse_noise",
+        "severity": 3,
+        "mean_feature_energy": 78.2744369506836,
+        "energy_gap_vs_id": -28.574203491210938,
+        "accuracy": 0.1657000035047531,
+        "auroc_native_epistemic": 0.2812331020832062,
+        "auroc_entropy": 0.8442316055297852
+      },
+      {
+        "corruption": "impulse_noise",
+        "severity": 4,
+        "mean_feature_energy": 80.53787231445312,
+        "energy_gap_vs_id": -26.310768127441406,
+        "accuracy": 0.07370000332593918,
+        "auroc_native_epistemic": 0.30066508054733276,
+        "auroc_entropy": 0.8620480895042419
+      },
+      {
+        "corruption": "impulse_noise",
+        "severity": 5,
+        "mean_feature_energy": 83.661865234375,
+        "energy_gap_vs_id": -23.18677520751953,
+        "accuracy": 0.04989999905228615,
+        "auroc_native_epistemic": 0.3316272795200348,
+        "auroc_entropy": 0.8735276460647583
+      },
+      {
+        "corruption": "jpeg_compression",
+        "severity": 1,
+        "mean_feature_energy": 88.03656005859375,
+        "energy_gap_vs_id": -18.81208038330078,
+        "accuracy": 0.567300021648407,
+        "auroc_native_epistemic": 0.36191847920417786,
+        "auroc_entropy": 0.6457018256187439
+      },
+      {
+        "corruption": "jpeg_compression",
+        "severity": 2,
+        "mean_feature_energy": 81.4596939086914,
+        "energy_gap_vs_id": -25.388946533203125,
+        "accuracy": 0.4909999966621399,
+        "auroc_native_epistemic": 0.3073034882545471,
+        "auroc_entropy": 0.7024080753326416
+      },
+      {
+        "corruption": "jpeg_compression",
+        "severity": 3,
+        "mean_feature_energy": 79.12161254882812,
+        "energy_gap_vs_id": -27.727027893066406,
+        "accuracy": 0.4607999920845032,
+        "auroc_native_epistemic": 0.2871140241622925,
+        "auroc_entropy": 0.7221444249153137
+      },
+      {
+        "corruption": "jpeg_compression",
+        "severity": 4,
+        "mean_feature_energy": 76.8591537475586,
+        "energy_gap_vs_id": -29.989486694335938,
+        "accuracy": 0.42800000309944153,
+        "auroc_native_epistemic": 0.26789361238479614,
+        "auroc_entropy": 0.7432345151901245
+      },
+      {
+        "corruption": "jpeg_compression",
+        "severity": 5,
+        "mean_feature_energy": 74.42982482910156,
+        "energy_gap_vs_id": -32.41881561279297,
+        "accuracy": 0.38850000500679016,
+        "auroc_native_epistemic": 0.24656036496162415,
+        "auroc_entropy": 0.7670282125473022
+      },
+      {
+        "corruption": "motion_blur",
+        "severity": 1,
+        "mean_feature_energy": 95.36035919189453,
+        "energy_gap_vs_id": -11.48828125,
+        "accuracy": 0.6302000284194946,
+        "auroc_native_epistemic": 0.4208372235298157,
+        "auroc_entropy": 0.5888054966926575
+      },
+      {
+        "corruption": "motion_blur",
+        "severity": 2,
+        "mean_feature_energy": 88.11392974853516,
+        "energy_gap_vs_id": -18.734710693359375,
+        "accuracy": 0.5383999943733215,
+        "auroc_native_epistemic": 0.3642544746398926,
+        "auroc_entropy": 0.6495671272277832
+      },
+      {
+        "corruption": "motion_blur",
+        "severity": 3,
+        "mean_feature_energy": 83.1608657836914,
+        "energy_gap_vs_id": -23.687774658203125,
+        "accuracy": 0.4620000123977661,
+        "auroc_native_epistemic": 0.3237774074077606,
+        "auroc_entropy": 0.6975659728050232
+      },
+      {
+        "corruption": "motion_blur",
+        "severity": 4,
+        "mean_feature_energy": 83.66964721679688,
+        "energy_gap_vs_id": -23.178993225097656,
+        "accuracy": 0.46059998869895935,
+        "auroc_native_epistemic": 0.32841092348098755,
+        "auroc_entropy": 0.6935808062553406
+      },
+      {
+        "corruption": "motion_blur",
+        "severity": 5,
+        "mean_feature_energy": 80.0810546875,
+        "energy_gap_vs_id": -26.76758575439453,
+        "accuracy": 0.3882000148296356,
+        "auroc_native_epistemic": 0.2971813380718231,
+        "auroc_entropy": 0.7282018065452576
+      },
+      {
+        "corruption": "pixelate",
+        "severity": 1,
+        "mean_feature_energy": 100.0857162475586,
+        "energy_gap_vs_id": -6.7629241943359375,
+        "accuracy": 0.6775000095367432,
+        "auroc_native_epistemic": 0.4541444480419159,
+        "auroc_entropy": 0.5522435307502747
+      },
+      {
+        "corruption": "pixelate",
+        "severity": 2,
+        "mean_feature_energy": 91.10013580322266,
+        "energy_gap_vs_id": -15.748504638671875,
+        "accuracy": 0.5986999869346619,
+        "auroc_native_epistemic": 0.3839282691478729,
+        "auroc_entropy": 0.6210047006607056
+      },
+      {
+        "corruption": "pixelate",
+        "severity": 3,
+        "mean_feature_energy": 86.13227081298828,
+        "energy_gap_vs_id": -20.71636962890625,
+        "accuracy": 0.536899983882904,
+        "auroc_native_epistemic": 0.3449593186378479,
+        "auroc_entropy": 0.6547290682792664
+      },
+      {
+        "corruption": "pixelate",
+        "severity": 4,
+        "mean_feature_energy": 74.83145141601562,
+        "energy_gap_vs_id": -32.017189025878906,
+        "accuracy": 0.36329999566078186,
+        "auroc_native_epistemic": 0.24996715784072876,
+        "auroc_entropy": 0.7326593399047852
+      },
+      {
+        "corruption": "pixelate",
+        "severity": 5,
+        "mean_feature_energy": 66.62981414794922,
+        "energy_gap_vs_id": -40.21882629394531,
+        "accuracy": 0.22200000286102295,
+        "auroc_native_epistemic": 0.1766257882118225,
+        "auroc_entropy": 0.7877073884010315
+      },
+      {
+        "corruption": "shot_noise",
+        "severity": 1,
+        "mean_feature_energy": 88.26240539550781,
+        "energy_gap_vs_id": -18.58623504638672,
+        "accuracy": 0.5022000074386597,
+        "auroc_native_epistemic": 0.3638884425163269,
+        "auroc_entropy": 0.6612427830696106
+      },
+      {
+        "corruption": "shot_noise",
+        "severity": 2,
+        "mean_feature_energy": 84.32708740234375,
+        "energy_gap_vs_id": -22.52155303955078,
+        "accuracy": 0.37450000643730164,
+        "auroc_native_epistemic": 0.33413222432136536,
+        "auroc_entropy": 0.7174647450447083
+      },
+      {
+        "corruption": "shot_noise",
+        "severity": 3,
+        "mean_feature_energy": 88.19009399414062,
+        "energy_gap_vs_id": -18.658546447753906,
+        "accuracy": 0.19249999523162842,
+        "auroc_native_epistemic": 0.37321221828460693,
+        "auroc_entropy": 0.7468137741088867
+      },
+      {
+        "corruption": "shot_noise",
+        "severity": 4,
+        "mean_feature_energy": 94.4315185546875,
+        "energy_gap_vs_id": -12.417121887207031,
+        "accuracy": 0.14229999482631683,
+        "auroc_native_epistemic": 0.425314337015152,
+        "auroc_entropy": 0.7399156093597412
+      },
+      {
+        "corruption": "shot_noise",
+        "severity": 5,
+        "mean_feature_energy": 106.80543518066406,
+        "energy_gap_vs_id": -0.04320526123046875,
+        "accuracy": 0.09730000048875809,
+        "auroc_native_epistemic": 0.517483115196228,
+        "auroc_entropy": 0.724647045135498
+      },
+      {
+        "corruption": "snow",
+        "severity": 1,
+        "mean_feature_energy": 95.00914001464844,
+        "energy_gap_vs_id": -11.839500427246094,
+        "accuracy": 0.6118000149726868,
+        "auroc_native_epistemic": 0.4139566719532013,
+        "auroc_entropy": 0.6073789000511169
+      },
+      {
+        "corruption": "snow",
+        "severity": 2,
+        "mean_feature_energy": 84.22518157958984,
+        "energy_gap_vs_id": -22.623458862304688,
+        "accuracy": 0.439300000667572,
+        "auroc_native_epistemic": 0.3328433334827423,
+        "auroc_entropy": 0.7032461166381836
+      },
+      {
+        "corruption": "snow",
+        "severity": 3,
+        "mean_feature_energy": 87.04468536376953,
+        "energy_gap_vs_id": -19.803955078125,
+        "accuracy": 0.4925999939441681,
+        "auroc_native_epistemic": 0.3547007739543915,
+        "auroc_entropy": 0.6812278628349304
+      },
+      {
+        "corruption": "snow",
+        "severity": 4,
+        "mean_feature_energy": 85.527099609375,
+        "energy_gap_vs_id": -21.32154083251953,
+        "accuracy": 0.4699000120162964,
+        "auroc_native_epistemic": 0.341871052980423,
+        "auroc_entropy": 0.697668731212616
+      },
+      {
+        "corruption": "snow",
+        "severity": 5,
+        "mean_feature_energy": 80.3807601928711,
+        "energy_gap_vs_id": -26.467880249023438,
+        "accuracy": 0.3955000042915344,
+        "auroc_native_epistemic": 0.3001013696193695,
+        "auroc_entropy": 0.739473819732666
+      },
+      {
+        "corruption": "zoom_blur",
+        "severity": 1,
+        "mean_feature_energy": 90.79133605957031,
+        "energy_gap_vs_id": -16.05730438232422,
+        "accuracy": 0.5934000015258789,
+        "auroc_native_epistemic": 0.3875209093093872,
+        "auroc_entropy": 0.6179095506668091
+      },
+      {
+        "corruption": "zoom_blur",
+        "severity": 2,
+        "mean_feature_energy": 85.5537338256836,
+        "energy_gap_vs_id": -21.294906616210938,
+        "accuracy": 0.5435000061988831,
+        "auroc_native_epistemic": 0.34447649121284485,
+        "auroc_entropy": 0.6547685265541077
+      },
+      {
+        "corruption": "zoom_blur",
+        "severity": 3,
+        "mean_feature_energy": 80.73898315429688,
+        "energy_gap_vs_id": -26.109657287597656,
+        "accuracy": 0.48429998755455017,
+        "auroc_native_epistemic": 0.3038713335990906,
+        "auroc_entropy": 0.6939586997032166
+      },
+      {
+        "corruption": "zoom_blur",
+        "severity": 4,
+        "mean_feature_energy": 76.97086334228516,
+        "energy_gap_vs_id": -29.877777099609375,
+        "accuracy": 0.4341999888420105,
+        "auroc_native_epistemic": 0.27090513706207275,
+        "auroc_entropy": 0.7237516641616821
+      },
+      {
+        "corruption": "zoom_blur",
+        "severity": 5,
+        "mean_feature_energy": 73.09674835205078,
+        "energy_gap_vs_id": -33.75189208984375,
+        "accuracy": 0.364300012588501,
+        "auroc_native_epistemic": 0.23684516549110413,
+        "auroc_entropy": 0.7572379112243652
+      }
+    ],
+    "hrc_baseline": [
+      {
+        "corruption": "brightness",
+        "severity": 1,
+        "mean_feature_energy": 105.79865264892578,
+        "energy_gap_vs_id": -1.04998779296875,
+        "accuracy": 0.7249000072479248,
+        "auroc_native_epistemic": 0.4929780960083008,
+        "auroc_entropy": 0.5052688717842102
+      },
+      {
+        "corruption": "brightness",
+        "severity": 2,
+        "mean_feature_energy": 103.52336883544922,
+        "energy_gap_vs_id": -3.3252716064453125,
+        "accuracy": 0.7131999731063843,
+        "auroc_native_epistemic": 0.477766215801239,
+        "auroc_entropy": 0.5187895894050598
+      },
+      {
+        "corruption": "brightness",
+        "severity": 3,
+        "mean_feature_energy": 100.44145202636719,
+        "energy_gap_vs_id": -6.407188415527344,
+        "accuracy": 0.6988000273704529,
+        "auroc_native_epistemic": 0.45606309175491333,
+        "auroc_entropy": 0.5391022562980652
+      },
+      {
+        "corruption": "brightness",
+        "severity": 4,
+        "mean_feature_energy": 96.91938781738281,
+        "energy_gap_vs_id": -9.929252624511719,
+        "accuracy": 0.6746000051498413,
+        "auroc_native_epistemic": 0.42987191677093506,
+        "auroc_entropy": 0.5654337406158447
+      },
+      {
+        "corruption": "brightness",
+        "severity": 5,
+        "mean_feature_energy": 89.54785919189453,
+        "energy_gap_vs_id": -17.30078125,
+        "accuracy": 0.5993000268936157,
+        "auroc_native_epistemic": 0.3734215199947357,
+        "auroc_entropy": 0.624837338924408
+      },
+      {
+        "corruption": "contrast",
+        "severity": 1,
+        "mean_feature_energy": 106.32058715820312,
+        "energy_gap_vs_id": -0.5280532836914062,
+        "accuracy": 0.7161999940872192,
+        "auroc_native_epistemic": 0.4967169165611267,
+        "auroc_entropy": 0.5095942616462708
+      },
+      {
+        "corruption": "contrast",
+        "severity": 2,
+        "mean_feature_energy": 96.53620147705078,
+        "energy_gap_vs_id": -10.31243896484375,
+        "accuracy": 0.6416000127792358,
+        "auroc_native_epistemic": 0.4279128313064575,
+        "auroc_entropy": 0.5797195434570312
+      },
+      {
+        "corruption": "contrast",
+        "severity": 3,
+        "mean_feature_energy": 89.55681610107422,
+        "energy_gap_vs_id": -17.291824340820312,
+        "accuracy": 0.5699999928474426,
+        "auroc_native_epistemic": 0.37445858120918274,
+        "auroc_entropy": 0.6323862671852112
+      },
+      {
+        "corruption": "contrast",
+        "severity": 4,
+        "mean_feature_energy": 81.30310821533203,
+        "energy_gap_vs_id": -25.5455322265625,
+        "accuracy": 0.4496999979019165,
+        "auroc_native_epistemic": 0.3063320517539978,
+        "auroc_entropy": 0.6985905766487122
+      },
+      {
+        "corruption": "contrast",
+        "severity": 5,
+        "mean_feature_energy": 72.34165954589844,
+        "energy_gap_vs_id": -34.506980895996094,
+        "accuracy": 0.17839999496936798,
+        "auroc_native_epistemic": 0.22354866564273834,
+        "auroc_entropy": 0.7793664932250977
+      },
+      {
+        "corruption": "defocus_blur",
+        "severity": 1,
+        "mean_feature_energy": 106.2667236328125,
+        "energy_gap_vs_id": -0.5819168090820312,
+        "accuracy": 0.7249000072479248,
+        "auroc_native_epistemic": 0.49711644649505615,
+        "auroc_entropy": 0.5039798617362976
+      },
+      {
+        "corruption": "defocus_blur",
+        "severity": 2,
+        "mean_feature_energy": 100.32498931884766,
+        "energy_gap_vs_id": -6.523651123046875,
+        "accuracy": 0.6898999810218811,
+        "auroc_native_epistemic": 0.4581845700740814,
+        "auroc_entropy": 0.5435321927070618
+      },
+      {
+        "corruption": "defocus_blur",
+        "severity": 3,
+        "mean_feature_energy": 89.17591094970703,
+        "energy_gap_vs_id": -17.6727294921875,
+        "accuracy": 0.5928000211715698,
+        "auroc_native_epistemic": 0.3753485083580017,
+        "auroc_entropy": 0.6257185935974121
+      },
+      {
+        "corruption": "defocus_blur",
+        "severity": 4,
+        "mean_feature_energy": 80.74986267089844,
+        "energy_gap_vs_id": -26.098777770996094,
+        "accuracy": 0.47510001063346863,
+        "auroc_native_epistemic": 0.3064144253730774,
+        "auroc_entropy": 0.7024663090705872
+      },
+      {
+        "corruption": "defocus_blur",
+        "severity": 5,
+        "mean_feature_energy": 70.0682373046875,
+        "energy_gap_vs_id": -36.78040313720703,
+        "accuracy": 0.3228999972343445,
+        "auroc_native_epistemic": 0.21148885786533356,
+        "auroc_entropy": 0.7871774435043335
+      },
+      {
+        "corruption": "elastic_transform",
+        "severity": 1,
+        "mean_feature_energy": 94.37698364257812,
+        "energy_gap_vs_id": -12.471656799316406,
+        "accuracy": 0.6312000155448914,
+        "auroc_native_epistemic": 0.4165803790092468,
+        "auroc_entropy": 0.5959776639938354
+      },
+      {
+        "corruption": "elastic_transform",
+        "severity": 2,
+        "mean_feature_energy": 93.87443542480469,
+        "energy_gap_vs_id": -12.974205017089844,
+        "accuracy": 0.6165000200271606,
+        "auroc_native_epistemic": 0.41383856534957886,
+        "auroc_entropy": 0.5969951152801514
+      },
+      {
+        "corruption": "elastic_transform",
+        "severity": 3,
+        "mean_feature_energy": 88.28469848632812,
+        "energy_gap_vs_id": -18.563941955566406,
+        "accuracy": 0.5691999793052673,
+        "auroc_native_epistemic": 0.3717576265335083,
+        "auroc_entropy": 0.6454917192459106
+      },
+      {
+        "corruption": "elastic_transform",
+        "severity": 4,
+        "mean_feature_energy": 86.41888427734375,
+        "energy_gap_vs_id": -20.42975616455078,
+        "accuracy": 0.5077999830245972,
+        "auroc_native_epistemic": 0.36173421144485474,
+        "auroc_entropy": 0.6791753768920898
+      },
+      {
+        "corruption": "elastic_transform",
+        "severity": 5,
+        "mean_feature_energy": 84.61500549316406,
+        "energy_gap_vs_id": -22.23363494873047,
+        "accuracy": 0.45680001378059387,
+        "auroc_native_epistemic": 0.34892943501472473,
+        "auroc_entropy": 0.7074288129806519
+      },
+      {
+        "corruption": "fog",
+        "severity": 1,
+        "mean_feature_energy": 107.10130310058594,
+        "energy_gap_vs_id": 0.25266265869140625,
+        "accuracy": 0.7202000021934509,
+        "auroc_native_epistemic": 0.5020068883895874,
+        "auroc_entropy": 0.5045713186264038
+      },
+      {
+        "corruption": "fog",
+        "severity": 2,
+        "mean_feature_energy": 102.68997955322266,
+        "energy_gap_vs_id": -4.158660888671875,
+        "accuracy": 0.6847000122070312,
+        "auroc_native_epistemic": 0.47310107946395874,
+        "auroc_entropy": 0.5407979488372803
+      },
+      {
+        "corruption": "fog",
+        "severity": 3,
+        "mean_feature_energy": 98.7029037475586,
+        "energy_gap_vs_id": -8.145736694335938,
+        "accuracy": 0.6373999714851379,
+        "auroc_native_epistemic": 0.4467965364456177,
+        "auroc_entropy": 0.5762856006622314
+      },
+      {
+        "corruption": "fog",
+        "severity": 4,
+        "mean_feature_energy": 93.35071563720703,
+        "energy_gap_vs_id": -13.4979248046875,
+        "accuracy": 0.5715000033378601,
+        "auroc_native_epistemic": 0.40989798307418823,
+        "auroc_entropy": 0.6256150603294373
+      },
+      {
+        "corruption": "fog",
+        "severity": 5,
+        "mean_feature_energy": 84.137939453125,
+        "energy_gap_vs_id": -22.71070098876953,
+        "accuracy": 0.3682999908924103,
+        "auroc_native_epistemic": 0.3425900638103485,
+        "auroc_entropy": 0.7333925366401672
+      },
+      {
+        "corruption": "frost",
+        "severity": 1,
+        "mean_feature_energy": 90.725830078125,
+        "energy_gap_vs_id": -16.12281036376953,
+        "accuracy": 0.6001999974250793,
+        "auroc_native_epistemic": 0.3844941556453705,
+        "auroc_entropy": 0.6163526773452759
+      },
+      {
+        "corruption": "frost",
+        "severity": 2,
+        "mean_feature_energy": 82.62236785888672,
+        "energy_gap_vs_id": -24.226272583007812,
+        "accuracy": 0.503000020980835,
+        "auroc_native_epistemic": 0.3178764581680298,
+        "auroc_entropy": 0.6868087649345398
+      },
+      {
+        "corruption": "frost",
+        "severity": 3,
+        "mean_feature_energy": 77.10139465332031,
+        "energy_gap_vs_id": -29.74724578857422,
+        "accuracy": 0.37869998812675476,
+        "auroc_native_epistemic": 0.26957929134368896,
+        "auroc_entropy": 0.7418807744979858
+      },
+      {
+        "corruption": "frost",
+        "severity": 4,
+        "mean_feature_energy": 76.66175079345703,
+        "energy_gap_vs_id": -30.1868896484375,
+        "accuracy": 0.3698999881744385,
+        "auroc_native_epistemic": 0.26576143503189087,
+        "auroc_entropy": 0.7468104958534241
+      },
+      {
+        "corruption": "frost",
+        "severity": 5,
+        "mean_feature_energy": 74.17185974121094,
+        "energy_gap_vs_id": -32.676780700683594,
+        "accuracy": 0.2842999994754791,
+        "auroc_native_epistemic": 0.2441284954547882,
+        "auroc_entropy": 0.7758074402809143
+      },
+      {
+        "corruption": "gaussian_noise",
+        "severity": 1,
+        "mean_feature_energy": 83.41948699951172,
+        "energy_gap_vs_id": -23.429153442382812,
+        "accuracy": 0.41119998693466187,
+        "auroc_native_epistemic": 0.3246307373046875,
+        "auroc_entropy": 0.715875506401062
+      },
+      {
+        "corruption": "gaussian_noise",
+        "severity": 2,
+        "mean_feature_energy": 84.1995849609375,
+        "energy_gap_vs_id": -22.64905548095703,
+        "accuracy": 0.2328999936580658,
+        "auroc_native_epistemic": 0.3247203528881073,
+        "auroc_entropy": 0.7408212423324585
+      },
+      {
+        "corruption": "gaussian_noise",
+        "severity": 3,
+        "mean_feature_energy": 93.9579849243164,
+        "energy_gap_vs_id": -12.890655517578125,
+        "accuracy": 0.12950000166893005,
+        "auroc_native_epistemic": 0.4016692638397217,
+        "auroc_entropy": 0.7035233378410339
+      },
+      {
+        "corruption": "gaussian_noise",
+        "severity": 4,
+        "mean_feature_energy": 100.70674896240234,
+        "energy_gap_vs_id": -6.1418914794921875,
+        "accuracy": 0.09920000284910202,
+        "auroc_native_epistemic": 0.45065373182296753,
+        "auroc_entropy": 0.6779797673225403
+      },
+      {
+        "corruption": "gaussian_noise",
+        "severity": 5,
+        "mean_feature_energy": 107.7401123046875,
+        "energy_gap_vs_id": 0.8914718627929688,
+        "accuracy": 0.07880000025033951,
+        "auroc_native_epistemic": 0.5003325939178467,
+        "auroc_entropy": 0.6533770561218262
+      },
+      {
+        "corruption": "glass_blur",
+        "severity": 1,
+        "mean_feature_energy": 72.5381851196289,
+        "energy_gap_vs_id": -34.310455322265625,
+        "accuracy": 0.1882999986410141,
+        "auroc_native_epistemic": 0.2238507866859436,
+        "auroc_entropy": 0.7767562866210938
+      },
+      {
+        "corruption": "glass_blur",
+        "severity": 2,
+        "mean_feature_energy": 73.13714599609375,
+        "energy_gap_vs_id": -33.71149444580078,
+        "accuracy": 0.19910000264644623,
+        "auroc_native_epistemic": 0.22956837713718414,
+        "auroc_entropy": 0.7762374877929688
+      },
+      {
+        "corruption": "glass_blur",
+        "severity": 3,
+        "mean_feature_energy": 72.6834945678711,
+        "energy_gap_vs_id": -34.16514587402344,
+        "accuracy": 0.23569999635219574,
+        "auroc_native_epistemic": 0.22751542925834656,
+        "auroc_entropy": 0.7745567560195923
+      },
+      {
+        "corruption": "glass_blur",
+        "severity": 4,
+        "mean_feature_energy": 74.6816177368164,
+        "energy_gap_vs_id": -32.167022705078125,
+        "accuracy": 0.14110000431537628,
+        "auroc_native_epistemic": 0.24149204790592194,
+        "auroc_entropy": 0.7755615711212158
+      },
+      {
+        "corruption": "glass_blur",
+        "severity": 5,
+        "mean_feature_energy": 72.83663177490234,
+        "energy_gap_vs_id": -34.01200866699219,
+        "accuracy": 0.1704999953508377,
+        "auroc_native_epistemic": 0.2277548909187317,
+        "auroc_entropy": 0.776554524898529
+      },
+      {
+        "corruption": "impulse_noise",
+        "severity": 1,
+        "mean_feature_energy": 84.07093048095703,
+        "energy_gap_vs_id": -22.7777099609375,
+        "accuracy": 0.46149998903274536,
+        "auroc_native_epistemic": 0.3274867832660675,
+        "auroc_entropy": 0.7112852931022644
+      },
+      {
+        "corruption": "impulse_noise",
+        "severity": 2,
+        "mean_feature_energy": 78.60692596435547,
+        "energy_gap_vs_id": -28.241714477539062,
+        "accuracy": 0.2653999924659729,
+        "auroc_native_epistemic": 0.27943432331085205,
+        "auroc_entropy": 0.7930718660354614
+      },
+      {
+        "corruption": "impulse_noise",
+        "severity": 3,
+        "mean_feature_energy": 78.2744369506836,
+        "energy_gap_vs_id": -28.574203491210938,
+        "accuracy": 0.1599999964237213,
+        "auroc_native_epistemic": 0.2716354727745056,
+        "auroc_entropy": 0.8194754719734192
+      },
+      {
+        "corruption": "impulse_noise",
+        "severity": 4,
+        "mean_feature_energy": 80.53787231445312,
+        "energy_gap_vs_id": -26.310768127441406,
+        "accuracy": 0.07850000262260437,
+        "auroc_native_epistemic": 0.28413307666778564,
+        "auroc_entropy": 0.8363052606582642
+      },
+      {
+        "corruption": "impulse_noise",
+        "severity": 5,
+        "mean_feature_energy": 83.661865234375,
+        "energy_gap_vs_id": -23.18677520751953,
+        "accuracy": 0.050200000405311584,
+        "auroc_native_epistemic": 0.30920931696891785,
+        "auroc_entropy": 0.8451430797576904
+      },
+      {
+        "corruption": "jpeg_compression",
+        "severity": 1,
+        "mean_feature_energy": 88.03656005859375,
+        "energy_gap_vs_id": -18.81208038330078,
+        "accuracy": 0.5760999917984009,
+        "auroc_native_epistemic": 0.36513736844062805,
+        "auroc_entropy": 0.6468129754066467
+      },
+      {
+        "corruption": "jpeg_compression",
+        "severity": 2,
+        "mean_feature_energy": 81.4596939086914,
+        "energy_gap_vs_id": -25.388946533203125,
+        "accuracy": 0.5015000104904175,
+        "auroc_native_epistemic": 0.31151917576789856,
+        "auroc_entropy": 0.7050766348838806
+      },
+      {
+        "corruption": "jpeg_compression",
+        "severity": 3,
+        "mean_feature_energy": 79.12161254882812,
+        "energy_gap_vs_id": -27.727027893066406,
+        "accuracy": 0.4675999879837036,
+        "auroc_native_epistemic": 0.29148048162460327,
+        "auroc_entropy": 0.7225424647331238
+      },
+      {
+        "corruption": "jpeg_compression",
+        "severity": 4,
+        "mean_feature_energy": 76.8591537475586,
+        "energy_gap_vs_id": -29.989486694335938,
+        "accuracy": 0.4390000104904175,
+        "auroc_native_epistemic": 0.272088885307312,
+        "auroc_entropy": 0.7427902221679688
+      },
+      {
+        "corruption": "jpeg_compression",
+        "severity": 5,
+        "mean_feature_energy": 74.42982482910156,
+        "energy_gap_vs_id": -32.41881561279297,
+        "accuracy": 0.3935000002384186,
+        "auroc_native_epistemic": 0.2505478858947754,
+        "auroc_entropy": 0.7648673057556152
+      },
+      {
+        "corruption": "motion_blur",
+        "severity": 1,
+        "mean_feature_energy": 95.36035919189453,
+        "energy_gap_vs_id": -11.48828125,
+        "accuracy": 0.6323000192642212,
+        "auroc_native_epistemic": 0.42046523094177246,
+        "auroc_entropy": 0.5909475088119507
+      },
+      {
+        "corruption": "motion_blur",
+        "severity": 2,
+        "mean_feature_energy": 88.11392974853516,
+        "energy_gap_vs_id": -18.734710693359375,
+        "accuracy": 0.5450000166893005,
+        "auroc_native_epistemic": 0.36241358518600464,
+        "auroc_entropy": 0.6539385914802551
+      },
+      {
+        "corruption": "motion_blur",
+        "severity": 3,
+        "mean_feature_energy": 83.1608657836914,
+        "energy_gap_vs_id": -23.687774658203125,
+        "accuracy": 0.46619999408721924,
+        "auroc_native_epistemic": 0.32073986530303955,
+        "auroc_entropy": 0.7025690674781799
+      },
+      {
+        "corruption": "motion_blur",
+        "severity": 4,
+        "mean_feature_energy": 83.66964721679688,
+        "energy_gap_vs_id": -23.178993225097656,
+        "accuracy": 0.46650001406669617,
+        "auroc_native_epistemic": 0.32588616013526917,
+        "auroc_entropy": 0.6994251012802124
+      },
+      {
+        "corruption": "motion_blur",
+        "severity": 5,
+        "mean_feature_energy": 80.0810546875,
+        "energy_gap_vs_id": -26.76758575439453,
+        "accuracy": 0.39500001072883606,
+        "auroc_native_epistemic": 0.2936093807220459,
+        "auroc_entropy": 0.7346380352973938
+      },
+      {
+        "corruption": "pixelate",
+        "severity": 1,
+        "mean_feature_energy": 100.0857162475586,
+        "energy_gap_vs_id": -6.7629241943359375,
+        "accuracy": 0.6858000159263611,
+        "auroc_native_epistemic": 0.4542061388492584,
+        "auroc_entropy": 0.5502359867095947
+      },
+      {
+        "corruption": "pixelate",
+        "severity": 2,
+        "mean_feature_energy": 91.10013580322266,
+        "energy_gap_vs_id": -15.748504638671875,
+        "accuracy": 0.5956000089645386,
+        "auroc_native_epistemic": 0.381728857755661,
+        "auroc_entropy": 0.6169407367706299
+      },
+      {
+        "corruption": "pixelate",
+        "severity": 3,
+        "mean_feature_energy": 86.13227081298828,
+        "energy_gap_vs_id": -20.71636962890625,
+        "accuracy": 0.5396999716758728,
+        "auroc_native_epistemic": 0.3406372666358948,
+        "auroc_entropy": 0.6502996683120728
+      },
+      {
+        "corruption": "pixelate",
+        "severity": 4,
+        "mean_feature_energy": 74.83145141601562,
+        "energy_gap_vs_id": -32.017189025878906,
+        "accuracy": 0.36570000648498535,
+        "auroc_native_epistemic": 0.24054665863513947,
+        "auroc_entropy": 0.7317720651626587
+      },
+      {
+        "corruption": "pixelate",
+        "severity": 5,
+        "mean_feature_energy": 66.62981414794922,
+        "energy_gap_vs_id": -40.21882629394531,
+        "accuracy": 0.22370000183582306,
+        "auroc_native_epistemic": 0.1611713320016861,
+        "auroc_entropy": 0.7887224555015564
+      },
+      {
+        "corruption": "shot_noise",
+        "severity": 1,
+        "mean_feature_energy": 88.26240539550781,
+        "energy_gap_vs_id": -18.58623504638672,
+        "accuracy": 0.5097000002861023,
+        "auroc_native_epistemic": 0.36626705527305603,
+        "auroc_entropy": 0.6682990789413452
+      },
+      {
+        "corruption": "shot_noise",
+        "severity": 2,
+        "mean_feature_energy": 84.32708740234375,
+        "energy_gap_vs_id": -22.52155303955078,
+        "accuracy": 0.38580000400543213,
+        "auroc_native_epistemic": 0.33289361000061035,
+        "auroc_entropy": 0.7229520082473755
+      },
+      {
+        "corruption": "shot_noise",
+        "severity": 3,
+        "mean_feature_energy": 88.19009399414062,
+        "energy_gap_vs_id": -18.658546447753906,
+        "accuracy": 0.18860000371932983,
+        "auroc_native_epistemic": 0.35930588841438293,
+        "auroc_entropy": 0.7325648069381714
+      },
+      {
+        "corruption": "shot_noise",
+        "severity": 4,
+        "mean_feature_energy": 94.4315185546875,
+        "energy_gap_vs_id": -12.417121887207031,
+        "accuracy": 0.14090000092983246,
+        "auroc_native_epistemic": 0.4065802991390228,
+        "auroc_entropy": 0.7082782983779907
+      },
+      {
+        "corruption": "shot_noise",
+        "severity": 5,
+        "mean_feature_energy": 106.80543518066406,
+        "energy_gap_vs_id": -0.04320526123046875,
+        "accuracy": 0.08990000188350677,
+        "auroc_native_epistemic": 0.4944465756416321,
+        "auroc_entropy": 0.6617133617401123
+      },
+      {
+        "corruption": "snow",
+        "severity": 1,
+        "mean_feature_energy": 95.00914001464844,
+        "energy_gap_vs_id": -11.839500427246094,
+        "accuracy": 0.6154000163078308,
+        "auroc_native_epistemic": 0.4158163368701935,
+        "auroc_entropy": 0.6035166382789612
+      },
+      {
+        "corruption": "snow",
+        "severity": 2,
+        "mean_feature_energy": 84.22518157958984,
+        "energy_gap_vs_id": -22.623458862304688,
+        "accuracy": 0.4514999985694885,
+        "auroc_native_epistemic": 0.33452844619750977,
+        "auroc_entropy": 0.702362060546875
+      },
+      {
+        "corruption": "snow",
+        "severity": 3,
+        "mean_feature_energy": 87.04468536376953,
+        "energy_gap_vs_id": -19.803955078125,
+        "accuracy": 0.49889999628067017,
+        "auroc_native_epistemic": 0.35844916105270386,
+        "auroc_entropy": 0.6792211532592773
+      },
+      {
+        "corruption": "snow",
+        "severity": 4,
+        "mean_feature_energy": 85.527099609375,
+        "energy_gap_vs_id": -21.32154083251953,
+        "accuracy": 0.474700003862381,
+        "auroc_native_epistemic": 0.34655946493148804,
+        "auroc_entropy": 0.696135938167572
+      },
+      {
+        "corruption": "snow",
+        "severity": 5,
+        "mean_feature_energy": 80.3807601928711,
+        "energy_gap_vs_id": -26.467880249023438,
+        "accuracy": 0.4023999869823456,
+        "auroc_native_epistemic": 0.30269140005111694,
+        "auroc_entropy": 0.7409616112709045
+      },
+      {
+        "corruption": "zoom_blur",
+        "severity": 1,
+        "mean_feature_energy": 90.79133605957031,
+        "energy_gap_vs_id": -16.05730438232422,
+        "accuracy": 0.5979999899864197,
+        "auroc_native_epistemic": 0.39062681794166565,
+        "auroc_entropy": 0.6221189498901367
+      },
+      {
+        "corruption": "zoom_blur",
+        "severity": 2,
+        "mean_feature_energy": 85.5537338256836,
+        "energy_gap_vs_id": -21.294906616210938,
+        "accuracy": 0.5493999719619751,
+        "auroc_native_epistemic": 0.34882664680480957,
+        "auroc_entropy": 0.6576416492462158
+      },
+      {
+        "corruption": "zoom_blur",
+        "severity": 3,
+        "mean_feature_energy": 80.73898315429688,
+        "energy_gap_vs_id": -26.109657287597656,
+        "accuracy": 0.48730000853538513,
+        "auroc_native_epistemic": 0.3088744282722473,
+        "auroc_entropy": 0.6969106793403625
+      },
+      {
+        "corruption": "zoom_blur",
+        "severity": 4,
+        "mean_feature_energy": 76.97086334228516,
+        "energy_gap_vs_id": -29.877777099609375,
+        "accuracy": 0.43849998712539673,
+        "auroc_native_epistemic": 0.27661705017089844,
+        "auroc_entropy": 0.7261078953742981
+      },
+      {
+        "corruption": "zoom_blur",
+        "severity": 5,
+        "mean_feature_energy": 73.09674835205078,
+        "energy_gap_vs_id": -33.75189208984375,
+        "accuracy": 0.3723999857902527,
+        "auroc_native_epistemic": 0.24284374713897705,
+        "auroc_entropy": 0.7592196464538574
+      }
+    ]
+  }
+}
