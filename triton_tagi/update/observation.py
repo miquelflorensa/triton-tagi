@@ -15,6 +15,9 @@ import torch
 import triton
 import triton.language as tl
 
+from ..cdf_variance import cdf_variance_activation
+from ..remax_kernels import hermite_rule
+
 BLOCK = 1024
 LOGISTIC_PROBIT_LAMBDA = math.pi / 8.0
 _EPS = 1e-8
@@ -560,4 +563,162 @@ def compute_hrc_tagiv_innovation(
     delta_var.scatter_add_(1, mean_idx, delta_var_z)
     delta_mu.scatter_add_(1, variance_idx, delta_mu_v2)
     delta_var.scatter_add_(1, variance_idx, delta_var_v2)
+    return delta_mu, delta_var
+
+
+# ======================================================================
+#  Gaussian training channel with the CDF variance head
+# ======================================================================
+
+
+def compute_cdf_tagiv_innovation(
+    targets: torch.Tensor,
+    mu_z: torch.Tensor,
+    var_z: torch.Tensor,
+    nu: torch.Tensor,
+    r: torch.Tensor,
+    *,
+    epsilon: float,
+    kappa: float,
+    hermite_order: int = 64,
+    variance_floor: float = 1e-12,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the exact scalar-quadrature innovation of the CDF Gaussian channel.
+
+    The observation model is the TAGI-V one, ``Y_i = Z_i + V_i`` with
+    ``V_i | U_i ~ N(0, h(U_i))`` and ``h(u) = epsilon + kappa Phi(u)``, on the
+    signed encoding ``y_i = 2 * 1{c == i} - 1`` for all ``K`` output units.
+    With ``d_i(u) = e_i + h(u)`` and ``Delta_i = y_i - mu_i`` the exact joint
+    posterior of the independent Gaussian pair ``(Z_i, U_i)`` is a scalar
+    integral against
+
+        ``omega_i(u)     = N(u; nu_i, r_i) N(y_i; mu_i, d_i(u))``,
+        ``omega_tilde_i  = omega_i / int omega_i``,
+
+    giving the head update ``nu_i^+ = int u omega_tilde_i du`` and
+    ``r_i^+ = int u^2 omega_tilde_i du - (nu_i^+)^2``, and, from
+    ``mu_{Z|y,u} = mu_i + (e_i / d_i(u)) Delta_i`` and
+    ``v_{Z|y,u} = e_i h(u) / d_i(u)``, the prediction update
+
+        ``mu_Z^+       = E_omega_tilde[mu_{Z|y,U}]``,
+        ``(sigma_Z^2)^+ = E_omega_tilde[v_{Z|y,U} + mu_{Z|y,U}^2] - (mu_Z^+)^2``.
+
+    Because ``omega_i`` already carries the Gaussian prior ``N(u; nu_i, r_i)``,
+    the Gauss--Hermite rule is placed *on that prior* — nodes
+    ``nu_i + sqrt(r_i) x_j`` with weights summing to one — and the nodes are
+    then reweighted by the likelihood factor ``N(y_i; mu_i, d_i(u))`` alone;
+    the prior density is never multiplied in a second time. Normalisation is
+    done in log space across the nodes, so a surprising label does not
+    underflow the weights, and the two second moments are accumulated about
+    ``nu_i`` and ``mu_i`` rather than about zero, which is the same algebra
+    without the cancellation. Everything is computed in float64.
+
+    This is a quadrature alternative to AGVI's two-stage Gaussian closure. It
+    is **not** a claim that the published AGVI algorithm uses these updates.
+    Note also that ``E[V_i^2 | y]`` and ``E[V2bar_i | y]`` are different
+    posterior quantities: a residual informs its realised square and its
+    generating variance differently, and only the latter is what the head
+    carries.
+
+    A deterministic head, ``r_i = 0``, is handled by the degenerate limit: the
+    nodes collapse onto ``U_i = nu_i``, the channel reduces to the fixed-noise
+    Gaussian update with observation variance ``e_i + h(nu_i)``, and the head
+    receives a zero delta rather than a division by zero.
+
+    Args:
+        targets: Signed observations ``y_i`` in ``{-1, +1}``, shape (..., K).
+        mu_z: Prediction-stream prior means ``mu_i``, shape (..., K).
+        var_z: Prediction-stream prior variances ``e_i``, shape (..., K).
+        nu: Variance-head prior means ``nu_i``, shape (..., K).
+        r: Variance-head prior variances ``r_i``, non-negative, shape (..., K).
+        epsilon: Strictly positive variance floor of ``h``.
+        kappa: Strictly positive variance range of ``h``.
+        hermite_order: Gauss--Hermite order for the head integral, at least
+            four. ``h`` traverses its whole range over roughly one unit of
+            ``u``, so the required order grows with ``r``. Measured relative
+            error against an order-256 reference: the default of 64 is
+            converged to roundoff for ``r <~ 0.5``, and holds ``3e-9`` at
+            ``r = 1``, ``1e-8`` at ``r = 2`` and ``1e-6`` at ``r = 4``; order
+            32 would give ``9e-9``, ``1e-6`` and ``8e-5`` there. Raise it, and
+            re-check convergence, whenever the head's prior variance range
+            widens.
+        variance_floor: Lower bound applied to ``e_i`` and ``r_i`` before they
+            are divided by to normalize the deltas.
+
+    Returns:
+        delta_mu: Normalized mean innovations ``(mu^+ - mu) / S`` in the
+            interleaved 2K layout, shape (..., 2K). Even slots hold the ``Z``
+            deltas against ``(mu_i, e_i)``, odd slots the ``U`` deltas against
+            ``(nu_i, r_i)``.
+        delta_var: Normalized variance innovations ``(S^+ - S) / S**2``, same
+            layout and shape.
+    """
+
+    if not epsilon > 0.0:
+        raise ValueError(f"epsilon must be positive, got {epsilon}")
+    if not kappa > 0.0:
+        raise ValueError(f"kappa must be positive, got {kappa}")
+    if hermite_order < 4:
+        raise ValueError(f"hermite_order must be at least four, got {hermite_order}")
+    if variance_floor <= 0.0 or not math.isfinite(variance_floor):
+        raise ValueError("variance_floor must be finite and positive")
+    shapes = {tuple(t.shape) for t in (targets, mu_z, var_z, nu, r)}
+    if len(shapes) != 1:
+        raise ValueError("CDF TAGI-V targets and prior moments must have matching shapes")
+    if targets.dim() < 1 or targets.shape[-1] < 1:
+        raise ValueError("CDF TAGI-V inputs must have a class dimension")
+    if not bool(torch.isfinite(targets).all()):
+        raise ValueError("CDF TAGI-V targets must be finite")
+
+    work_targets = targets.double()
+    prior_mu = mu_z.double()
+    prior_var = var_z.double().clamp_min(0.0)
+    prior_nu = nu.double()
+    prior_r = r.double().clamp_min(0.0)
+
+    nodes, weights = hermite_rule(hermite_order, reference=prior_mu)
+    # (..., K, 1) against (order,) -> (..., K, order): one head integral per unit.
+    offset = prior_r.sqrt().unsqueeze(-1) * nodes
+    head = prior_nu.unsqueeze(-1) + offset
+    noise = cdf_variance_activation(head, epsilon=epsilon, kappa=kappa)
+    total = prior_var.unsqueeze(-1) + noise
+    residual = (work_targets - prior_mu).unsqueeze(-1)
+
+    # Likelihood factor N(y; mu, d(u)) in log space; the prior is already the rule.
+    log_likelihood = -0.5 * (torch.log(total) + residual.square() / total)
+    log_weight = torch.log(weights) + log_likelihood
+    log_weight = log_weight - log_weight.amax(dim=-1, keepdim=True)
+    tilt = torch.exp(log_weight)
+    tilt = tilt / tilt.sum(dim=-1, keepdim=True)
+
+    # Head posterior, accumulated about nu_i.
+    shift = (tilt * offset).sum(-1)
+    second = (tilt * offset.square()).sum(-1)
+    nu_post = prior_nu + shift
+    r_post = (second - shift.square()).clamp_min(0.0)
+
+    # Prediction posterior, accumulated about mu_i.
+    gain = prior_var.unsqueeze(-1) * residual / total
+    conditional_var = prior_var.unsqueeze(-1) * noise / total
+    gain_mean = (tilt * gain).sum(-1)
+    gain_second = (tilt * gain.square()).sum(-1)
+    mean_var = (tilt * conditional_var).sum(-1)
+    mu_z_post = prior_mu + gain_mean
+    var_z_post = (mean_var + gain_second - gain_mean.square()).clamp_min(0.0)
+
+    safe_var = prior_var.clamp_min(variance_floor)
+    safe_r = prior_r.clamp_min(variance_floor)
+    delta_mu_z = (mu_z_post - prior_mu) / safe_var
+    delta_var_z = (var_z_post - prior_var) / safe_var.square()
+    delta_nu = (nu_post - prior_nu) / safe_r
+    delta_r = (r_post - prior_r) / safe_r.square()
+
+    num_classes = work_targets.shape[-1]
+    flat_shape = (*work_targets.shape[:-1], 2 * num_classes)
+    delta_mu = torch.empty(flat_shape, dtype=work_targets.dtype, device=work_targets.device)
+    delta_var = torch.empty_like(delta_mu)
+    delta_mu[..., 0::2] = delta_mu_z
+    delta_var[..., 0::2] = delta_var_z
+    delta_mu[..., 1::2] = delta_nu
+    delta_var[..., 1::2] = delta_r
     return delta_mu, delta_var

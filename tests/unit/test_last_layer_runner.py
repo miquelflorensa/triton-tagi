@@ -382,6 +382,7 @@ def _init_manifest(tmp_path):
             "fixed_noise_heads": ["hrc", "remax_lognormal"],
             "logit_heads": ["logit_tagiv"],
             "hrc_trees": ["padded", "full"],
+            "hrc_full_prior_offsets": False,
             "mean_init": ["random", "zero", "backbone"],
             "tied_gains": [0.1, 0.3],
             "sigma_v": [0.1],
@@ -401,6 +402,8 @@ def test_hrc_is_crossed_with_both_trees_and_nothing_else_is(tmp_path):
     assert len(remax) == 6  # no tree to vary
     assert all("hrc_tree" not in c for c in remax)
     assert {c.get("hrc_tree") for c in hrc} == {None, "full"}
+    full = [c for c in hrc if c.get("hrc_tree") == "full"]
+    assert all(c["hrc_prior_offsets"] is False for c in full)
 
 
 def test_the_default_tree_arm_keeps_the_run_hash_of_the_cells_already_on_disk(tmp_path):
@@ -422,10 +425,50 @@ def test_the_default_tree_arm_keeps_the_run_hash_of_the_cells_already_on_disk(tm
 def test_selection_arm_separates_the_two_trees(tmp_path):
     assert runner.selection_arm({"head": "hrc"}) == "hrc"
     assert runner.selection_arm({"head": "hrc", "hrc_tree": "padded"}) == "hrc"
-    assert runner.selection_arm({"head": "hrc", "hrc_tree": "full"}) == "hrc:full"
+    assert (
+        runner.selection_arm(
+            {"head": "hrc", "hrc_tree": "full", "hrc_prior_offsets": False}
+        )
+        == "hrc:full"
+    )
     # the probit head's default is the full tree, so that one keeps its name
     assert runner.selection_arm({"head": "hrc_probit", "hrc_tree": "full"}) == "hrc_probit"
     assert runner.selection_arm({"head": "remax_lognormal"}) == "remax_lognormal"
+
+
+def test_selection_arm_separates_the_two_full_tree_models(tmp_path):
+    """A full tree with readout offsets is a different model, not a sibling cell.
+
+    step_hrc computes its innovation against the raw network output and never
+    reads hrc.offset, while hrc_log_probs adds tau * offset at inference, so an
+    offsets-on run is trained blind to a shift its readout then applies. The
+    cells on disk predate the axis and carry no key, so the resolved default --
+    offsets on -- has to be what a missing key means, or they would be selected
+    against the corrected arm as if the two were interchangeable.
+    """
+
+    legacy = {"head": "hrc", "hrc_tree": "full"}
+    assert runner.selection_arm(legacy) == "hrc:full+offsets"
+    assert runner.selection_arm({**legacy, "hrc_prior_offsets": True}) == "hrc:full+offsets"
+    assert runner.selection_arm({**legacy, "hrc_prior_offsets": False}) == "hrc:full"
+    # the padded tree has no offsets to carry, and its name must not move
+    assert runner.selection_arm({"head": "hrc", "hrc_prior_offsets": False}) == "hrc"
+
+
+def test_the_offsets_axis_reaches_selection_and_the_report(tmp_path):
+    """Both projections have to carry the flag, or the arms silently merge.
+
+    This is the trap that has now bitten mean_init and hrc_tree: an axis that
+    select drops is confirmed at the constructor default instead of the chosen
+    value, and an axis the report drops averages the two arms into one row.
+    """
+
+    assert "hrc_prior_offsets" in runner.CONFIG_IDENTITY_FIELDS
+    identity = runner.config_identity(
+        {"head": "hrc", "hrc_tree": "full", "hrc_prior_offsets": False}
+    )
+    assert identity["hrc_prior_offsets"] is False
+    assert runner.config_identity({"head": "hrc"})["hrc_prior_offsets"] == ""
 
 
 def test_select_keeps_a_winner_per_tree_and_carries_the_tree_forward(tmp_path):
@@ -455,6 +498,7 @@ def test_select_keeps_a_winner_per_tree_and_carries_the_tree_forward(tmp_path):
         }
         if tree:
             config["hrc_tree"] = tree
+            config["hrc_prior_offsets"] = False
         (run_dir / "config.json").write_text(json.dumps(config))
         (run_dir / "history.json").write_text(
             json.dumps(

@@ -369,3 +369,84 @@ class TestHierarchicalProbit:
                 torch.ones(1, 1),
                 torch.ones(1, 1, dtype=torch.int64),
             )
+
+
+class TestFullTreeBranchOffsets:
+    """The full tree's branch offsets are a readout-only shift.
+
+    ``class_to_obs_full`` stores ``offset[j] = Phi^-1(pi_j)`` so that a zero
+    network output reproduces the branch prior, and ``hrc_probit.hrc_log_probs``
+    adds ``tau * offset`` to the latent mean. ``network.step_hrc`` computes its
+    innovation against the raw output and never reads ``hrc.offset``, so nothing
+    the network learns depends on it: training fits the branch frequencies from
+    data and the readout then applies the prior a second time.
+
+    These tests pin that behaviour rather than endorse it. Making the offset a
+    real prior means training against the shifted latent, which changes the
+    model; until then the study runs the full tree with
+    ``hrc_prior_offsets=False`` -- measured at gain 0.1 / sigma_v 0.3, 20
+    epochs, zero init, the offsets cost 0.0233 NLL on CIFAR-100 and 0.0060 on
+    CIFAR-10.
+    """
+
+    def test_offsets_change_the_tree_but_not_its_shape(self):
+        from triton_tagi.hrc_softmax import class_to_obs_full
+
+        with_offsets = class_to_obs_full(10)
+        without = class_to_obs_full(10, use_prior_offsets=False)
+
+        assert with_offsets.len == without.len == 9
+        assert torch.equal(with_offsets.idx, without.idx)
+        assert torch.equal(with_offsets.obs, without.obs)
+        assert torch.equal(with_offsets.mask, without.mask)
+        # only the unbalanced splits carry a nonzero shift
+        assert bool((with_offsets.offset != 0).any())
+        assert bool((without.offset == 0).all())
+
+    def test_the_full_tree_is_not_the_padded_tree_with_padding_removed(self):
+        """The two trees partition the classes differently, by construction.
+
+        ``class_to_obs`` is a fixed-depth code, so for K = 10 its root splits
+        eight classes against two; ``class_to_obs_full`` splits by recursive
+        median, five against five. Neither is the other with dead nodes pruned,
+        which is why an ``hrc:full`` row is not an ``hrc`` row minus padding.
+        """
+
+        from triton_tagi.hrc_softmax import class_to_obs_full
+
+        padded, full = class_to_obs(10), class_to_obs_full(10)
+        root_sign_padded = padded.obs[:, 0]
+        root_sign_full = full.obs[:, 0]
+        assert int((root_sign_padded > 0).sum()) == 8
+        assert int((root_sign_full > 0).sum()) == 5
+
+    @pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="the TAGI update kernels are Triton/CUDA"
+    )
+    def test_training_is_blind_to_the_offset(self):
+        """Identical weights either way: no update ever depends on the offset."""
+
+        from triton_tagi.classification import TAGILastLayerClassifier
+
+        features = torch.randn(64, 8, generator=torch.Generator().manual_seed(0))
+        labels = torch.arange(64) % 10
+
+        def train(use_offsets: bool):
+            torch.manual_seed(0)
+            classifier = TAGILastLayerClassifier(
+                8, 10, head="hrc", hrc_tree="full",
+                hrc_prior_offsets=use_offsets, device="cuda",
+                gain_w=0.1, gain_b=0.1, sigma_v=0.3, mean_init="zero",
+            )
+            classifier.fit(features, labels, epochs=2, batch_size=32, record_initial=False)
+            return classifier
+
+        on, off = train(True), train(False)
+        assert bool((on.hrc.offset != 0).any())
+        assert torch.allclose(on.linear.mw, off.linear.mw)
+        assert torch.allclose(on.linear.Sw, off.linear.Sw)
+        # ...and yet the readout differs, which is the whole defect
+        probabilities_on = on.predict(features, sigma_v=on.sigma_v).probabilities
+        on.hrc.offset = torch.zeros_like(on.hrc.offset)
+        probabilities_off = on.predict(features, sigma_v=on.sigma_v).probabilities
+        assert not torch.allclose(probabilities_on, probabilities_off)

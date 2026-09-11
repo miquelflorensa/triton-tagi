@@ -31,6 +31,7 @@ import torch
 from torch import Tensor
 
 from .base import Layer, LearnableLayer
+from .layers.even_probit import EvenProbit
 from .layers.multihead_attention import MultiheadAttentionV2
 from .layers.resblock import ResBlock
 from .logit_tagiv import (
@@ -39,8 +40,10 @@ from .logit_tagiv import (
     compute_logit_replicate_innovation,
     compute_logit_tagiv_innovation,
 )
+from .probitree import ProbiTree, probitree_label_update
 from .update.observation import (
     compute_categorical_innovation,
+    compute_cdf_tagiv_innovation,
     compute_hrc_tagiv_innovation,
     compute_innovation,
     compute_innovation_with_indices,
@@ -305,6 +308,50 @@ class Sequential:
                 layer.update(cap_factor)
         return y_pred_mu, y_pred_var
 
+    def step_probitree(
+        self,
+        x_batch: Tensor,
+        labels: Tensor,
+        tree: ProbiTree,
+        r: float = 1.0,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Run one direct-probit ``ProbiTree`` observation update.
+
+        All active gate messages are computed from the same forward-pass prior
+        and sent through the layerwise TAGI backward recursion once.
+
+        Minibatches use the same batch approximation as every other head here:
+        each layer sums its parameter deltas over the batch dimension and the
+        capped update is applied once, with the cap factor read from the batch
+        size. Cross-sample covariance between the gate messages is neglected,
+        exactly as in :meth:`step`, :meth:`step_hrc`, and
+        :meth:`step_categorical`.
+
+        Returns the pre-update output moments and the per-sample path log
+        evidence, shaped ``(batch,)``.
+        """
+
+        batch_size = x_batch.shape[0]
+        if labels.dim() != 1 or labels.numel() != batch_size:
+            raise ValueError("ProbiTree labels must have shape (batch,) matching the inputs")
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+        if y_pred_mu.dim() != 2 or y_pred_mu.shape[1] != tree.num_gates:
+            raise ValueError("ProbiTree outputs must have shape (batch, K - 1)")
+
+        update = probitree_label_update(tree, y_pred_mu, y_pred_var, labels, r)
+        # Layer.backward consumes derivatives of log evidence with respect to
+        # prior output means: exactly the stable g/h interface here.
+        delta_mu = update.g.to(y_pred_mu.dtype)
+        delta_var = update.h.to(y_pred_var.dtype)
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+
+        cap_factor = get_cap_factor(batch_size)
+        for layer in self.layers:
+            if isinstance(layer, LearnableLayer):
+                layer.update(cap_factor)
+        return y_pred_mu, y_pred_var, update.log_evidence
+
     # ------------------------------------------------------------------
     #  Fixed-noise-free categorical training steps
     # ------------------------------------------------------------------
@@ -438,6 +485,77 @@ class Sequential:
             repeats=repeats,
             variance_floor=variance_floor,
         )
+        for layer in reversed(self.layers):
+            delta_mu, delta_var = layer.backward(delta_mu, delta_var)
+        cap_factor = get_cap_factor(batch_size)
+        for layer in self.layers:
+            if isinstance(layer, LearnableLayer):
+                layer.update(cap_factor)
+        return y_pred_mu, y_pred_var
+
+    def step_cdf_tagiv(
+        self,
+        x_batch: Tensor,
+        labels: Tensor,
+        *,
+        epsilon: float,
+        kappa: float,
+        hermite_order: int = 64,
+    ) -> tuple[Tensor, Tensor]:
+        """Train an interleaved TAGI-V head through the CDF Gaussian channel.
+
+        The output layer is the interleaved ``2K`` head followed by
+        :class:`~triton_tagi.layers.EvenProbit`. Integer class labels are
+        expanded to the signed encoding ``y_i = 2 * 1{c == i} - 1`` over all
+        ``K`` units, which is the encoding the channel's logit origin is fixed
+        to; a ``0/1`` one-hot would move that origin. The head's own Gaussian
+        prior ``(nu, r)`` is read from the ``EvenProbit`` forward cache, since
+        the post-activation moments do not determine it.
+
+        Args:
+            x_batch: Input batch, shape (B, ...).
+            labels: Integer class indices, shape (B,).
+            epsilon: Strictly positive variance floor of the activation.
+            kappa: Strictly positive variance range of the activation.
+            hermite_order: Gauss--Hermite order for the head integral.
+
+        Returns:
+            y_pred_mu: Output means before the update, shape (B, 2K).
+            y_pred_var: Output variances before the update, shape (B, 2K).
+        """
+
+        probit = next(
+            (layer for layer in reversed(self.layers) if isinstance(layer, EvenProbit)),
+            None,
+        )
+        if probit is None:
+            raise ValueError("step_cdf_tagiv requires an EvenProbit layer in the network")
+
+        batch_size = x_batch.shape[0]
+        y_pred_mu, y_pred_var = self.forward(x_batch)
+        if y_pred_mu.dim() != 2 or y_pred_mu.shape[1] % 2:
+            raise ValueError("CDF TAGI-V expects a two-dimensional output of width 2K")
+
+        num_classes = y_pred_mu.shape[1] // 2
+        flat_labels = labels.reshape(-1).long().to(y_pred_mu.device)
+        if flat_labels.numel() != batch_size:
+            raise ValueError("labels leading shape must match the prediction batch")
+        if bool(((flat_labels < 0) | (flat_labels >= num_classes)).any()):
+            raise ValueError("labels contain an invalid class index")
+        targets = 2.0 * torch.nn.functional.one_hot(flat_labels, num_classes).double() - 1.0
+
+        delta_mu, delta_var = compute_cdf_tagiv_innovation(
+            targets,
+            y_pred_mu[:, 0::2],
+            y_pred_var[:, 0::2],
+            probit.nu,
+            probit.r,
+            epsilon=epsilon,
+            kappa=kappa,
+            hermite_order=hermite_order,
+        )
+        delta_mu = delta_mu.to(y_pred_mu.dtype)
+        delta_var = delta_var.to(y_pred_var.dtype)
         for layer in reversed(self.layers):
             delta_mu, delta_var = layer.backward(delta_mu, delta_var)
         cap_factor = get_cap_factor(batch_size)

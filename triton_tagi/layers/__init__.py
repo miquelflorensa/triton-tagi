@@ -5,6 +5,7 @@ from .batchnorm2d import BatchNorm2D
 from .conv2d import Conv2D
 from .embedding import Embedding
 from .even_exp import EvenExp
+from .even_probit import EvenProbit
 from .even_softplus import EvenSoftplus
 from .flatten import Flatten
 from .layernorm import LayerNorm
@@ -24,6 +25,7 @@ __all__ = [
     "Conv2D",
     "Embedding",
     "EvenExp",
+    "EvenProbit",
     "EvenSoftplus",
     "Flatten",
     "LayerNorm",
